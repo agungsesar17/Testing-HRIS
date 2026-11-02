@@ -1,0 +1,2285 @@
+// src/App.tsx
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Users, Calendar, CheckSquare, BookOpen, BarChart3, FileText, Settings,
+  Plus, Trash2, Save, Printer, Download, RefreshCw, Database, CheckCircle2,
+  AlertCircle, Briefcase, MapPin, Layers, Award, Sparkles, Clock, Upload
+} from 'lucide-react';
+import {
+  initSupabaseRuntime,
+  isSupabaseConfigured,
+  SkenaHrApi,
+  CompanySettings,
+  Employee,
+  Competency,
+  WorkSchedule,
+  AttendanceRecord,
+  ActivityLog,
+  KpiEvaluation,
+  EmployeeReport,
+  EmploymentStatus,
+  AttendanceStatus,
+  IdpLmsItem
+} from './services/supabaseClient';
+
+type ActiveModule = 'dashboard' | 'schedules' | 'attendance' | 'logs' | 'kpi_workload' | 'report_card';
+
+export default function App() {
+  // Navigation & Connection State
+  const [activeModule, setActiveModule] = useState<ActiveModule>('dashboard');
+  const [showConnModal, setShowConnModal] = useState<boolean>(!isSupabaseConfigured());
+  const [connUrl, setConnUrl] = useState<string>('');
+  const [connKey, setConnKey] = useState<string>('');
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Cloud Database State (Zero LocalStorage)
+  const [settings, setSettings] = useState<CompanySettings>({
+    company_name: 'Skena Wahana Kreatif',
+    business_registration_no: 'NIB-91203019283',
+    industry_sector: 'Creative & Digital Agency',
+    department_scope: 'All Creative & Operations',
+    evaluation_cycle: 'Semi-Annual Performance & Talent Review',
+    period_year: '2026',
+    period_term: 'Semester 2 (Jul - Des)',
+    hr_lead_name: 'Human Capital Generalist',
+    hr_lead_id: 'HC-SKENA-01',
+    managing_director_name: 'Managing Director Skena',
+    managing_director_id: 'MD-SKENA-01',
+  });
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [competencies, setCompetencies] = useState<Competency[]>([]);
+  const [schedules, setSchedules] = useState<WorkSchedule[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  const [kpiList, setKpiList] = useState<KpiEvaluation[]>([]);
+
+  // Module 1: Form States (Employee & Competency)
+  const [empForm, setEmpForm] = useState<Partial<Employee>>({
+    employee_nik: '',
+    tax_bpjs_id: '',
+    full_name: '',
+    gender: 'L',
+    role_title: '',
+    department: 'Creative Production',
+    employment_status: 'Full Time',
+    contract_duration: '12 Bulan',
+    benefits_package: 'BPJS Kesehatan, BPJS Ketenagakerjaan, Device Allowance',
+    assigned_project: '',
+    work_location: 'Makassar HQ',
+    direct_supervisor: 'Managing Director',
+    is_active: true,
+  });
+
+  const [compForm, setCompForm] = useState<Omit<Competency, 'id'>>({
+    competency_code: '',
+    competency_name: '',
+    category: 'Core KPI',
+    target_threshold: 78,
+    standard_workload_hours: 40,
+  });
+
+  // Module 2: Schedule Form State
+  const [schedForm, setSchedForm] = useState<Omit<WorkSchedule, 'id' | 'competencies'>>({
+    day_of_week: 'Senin',
+    start_time: '09:00',
+    end_time: '12:00',
+    shift_code: 'Sprint & Content Production',
+    competency_id: '',
+    location_agenda_notes: 'Studio Utama Makassar',
+  });
+
+  // Module 3: Attendance State
+  const todayStr = new Date().toISOString().split('T')[0];
+  const [selectedDate, setSelectedDate] = useState<string>(todayStr);
+  const [dailyAttendances, setDailyAttendances] = useState<Record<string, AttendanceRecord>>({});
+  const [attendanceMonth, setAttendanceMonth] = useState<string>(todayStr.slice(0, 7));
+  const [monthlyAttendances, setMonthlyAttendances] = useState<AttendanceRecord[]>([]);
+  const [attendanceSubTab, setAttendanceSubTab] = useState<'daily' | 'monthly'>('daily');
+
+  // Module 4: Activity & LMS Log State
+  const [logForm, setLogForm] = useState<ActivityLog>({
+    log_date: todayStr,
+    schedule_id: null,
+    competency_id: '',
+    sprint_session_info: 'Sprint Pagi (09:00 - 12:00)',
+    project_deliverable_topic: '',
+    execution_details: '',
+    blocker_evaluator_notes: '',
+    total_active_team: 0,
+    total_on_leave: 0,
+  });
+
+  // Module 5: KPI & Workload Analysis State
+  const [selectedCompId, setSelectedCompId] = useState<string>('');
+  const [inlineKpiMap, setInlineKpiMap] = useState<Record<string, KpiEvaluation>>({});
+
+  // Module 6: Report Card & Talent Pipeline State
+  const [selectedReportEmpId, setSelectedReportEmpId] = useState<string>('');
+  const [empReportData, setEmpReportData] = useState<EmployeeReport>({
+    employee_id: '',
+    period_year: '2026',
+    period_term: 'Semester 2 (Jul - Des)',
+    idp_lms_modules: [
+      {
+        module_name: 'Creative Leadership & Agile Project Management',
+        category: 'LMS Course',
+        target_date: '2026-11-30',
+        status: 'Completed',
+        score: '92/100',
+      },
+    ],
+    behavioral_culture_notes: 'Menunjukkan inisiatif tinggi dalam kolaborasi lintas tim dan adaptif terhadap perubahan brief klien.',
+    hr_director_notes: 'Direkomendasikan untuk diberikan tanggung jawab proyek skala regional pada kuartal berikutnya.',
+    talent_pipeline_box: 'High Potential - High Performer (Star)',
+    career_decision: 'Promote / Grade Up',
+    next_role_assignment: 'Senior Creative Specialist',
+    report_date: todayStr,
+  });
+  const [empReportAttendances, setEmpReportAttendances] = useState<AttendanceRecord[]>([]);
+
+  // Helper Toast Notification
+  const triggerToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  // Load All Initial Data from Supabase
+  const fetchMasterData = async () => {
+    if (!isSupabaseConfigured()) return;
+    setIsLoading(true);
+    try {
+      const [dbSettings, dbEmployees, dbCompetencies, dbSchedules, dbLogs] = await Promise.all([
+        SkenaHrApi.getSettings(),
+        SkenaHrApi.getEmployees(),
+        SkenaHrApi.getCompetencies(),
+        SkenaHrApi.getSchedules(),
+        SkenaHrApi.getActivityLogs(),
+      ]);
+
+      const activePeriodYear = dbSettings?.period_year || settings.period_year;
+      const activePeriodTerm = dbSettings?.period_term || settings.period_term;
+
+      if (dbSettings) setSettings(dbSettings);
+      setEmployees(dbEmployees);
+      setCompetencies(dbCompetencies);
+      setSchedules(dbSchedules);
+      setActivityLogs(dbLogs);
+
+      if (dbCompetencies.length > 0 && !selectedCompId) {
+        setSelectedCompId(dbCompetencies[0].id);
+        setSchedForm((prev) => ({ ...prev, competency_id: dbCompetencies[0].id }));
+        setLogForm((prev) => ({ ...prev, competency_id: dbCompetencies[0].id }));
+      }
+      if (dbEmployees.length > 0 && !selectedReportEmpId) {
+        setSelectedReportEmpId(dbEmployees[0].id);
+      }
+
+      const dbKpis = await SkenaHrApi.getKpiEvaluations(activePeriodYear, activePeriodTerm);
+      setKpiList(dbKpis);
+
+      await fetchDailyAttendance(selectedDate, dbEmployees);
+      await fetchMonthlyAttendance(attendanceMonth);
+    } catch (err: any) {
+      triggerToast(`Gagal memuat data Supabase: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isSupabaseConfigured()) {
+      fetchMasterData();
+    }
+  }, []);
+
+  // Fetch Attendance per Date
+  const fetchDailyAttendance = async (dateStr: string, empList: Employee[] = employees) => {
+    if (!isSupabaseConfigured()) return;
+    try {
+      const records = await SkenaHrApi.getAttendancesByDate(dateStr);
+      const map: Record<string, AttendanceRecord> = {};
+      empList.forEach((emp) => {
+        const found = records.find((r) => r.employee_id === emp.id);
+        map[emp.id] = found || {
+          employee_id: emp.id,
+          attendance_date: dateStr,
+          status: 'WFO',
+          work_location_tag: emp.work_location || 'Makassar HQ',
+          notes: '',
+        };
+      });
+      setDailyAttendances(map);
+    } catch (err: any) {
+      triggerToast(`Gagal mengambil presensi harian: ${err.message}`, 'error');
+    }
+  };
+
+  // Fetch Monthly Attendance Matrix
+  const fetchMonthlyAttendance = async (yearMonth: string) => {
+    if (!isSupabaseConfigured()) return;
+    try {
+      const records = await SkenaHrApi.getAttendancesByMonth(yearMonth);
+      setMonthlyAttendances(records);
+    } catch (err: any) {
+      triggerToast(`Gagal memuat rekap presensi bulanan: ${err.message}`, 'error');
+    }
+  };
+
+  // Sync Attendance Counts into Module 4 Activity Log when log_date changes
+  const syncAttendanceToLogDate = async (dateStr: string) => {
+    if (!isSupabaseConfigured()) return;
+    try {
+      const records = await SkenaHrApi.getAttendancesByDate(dateStr);
+      const activeCount = records.filter((r) => r.status === 'WFO' || r.status === 'WFH' || r.status === 'Take Content').length;
+      const leaveCount = records.filter((r) => r.status === 'Cuti').length;
+      setLogForm((prev) => ({
+        ...prev,
+        log_date: dateStr,
+        total_active_team: activeCount,
+        total_on_leave: leaveCount,
+      }));
+    } catch (err: any) {
+      triggerToast(`Gagal sinkronisasi presensi log: ${err.message}`, 'error');
+    }
+  };
+
+  // Sync Inline KPI Spreadsheet when selectedCompId or kpiList changes
+  useEffect(() => {
+    if (!selectedCompId) return;
+    const map: Record<string, KpiEvaluation> = {};
+    employees.forEach((emp) => {
+      const existing = kpiList.find(
+        (k) =>
+          k.employee_id === emp.id &&
+          k.competency_id === selectedCompId &&
+          k.period_year === settings.period_year &&
+          k.period_term === settings.period_term
+      );
+      map[emp.id] = existing || {
+        employee_id: emp.id,
+        competency_id: selectedCompId,
+        period_year: settings.period_year,
+        period_term: settings.period_term,
+        kpi_q1: 80,
+        kpi_q2: 80,
+        kpi_q3: 80,
+        kpi_q4: 80,
+        mid_review_score: 80,
+        final_project_score: 80,
+        current_skill_level: 3,
+        workload_percentage: 85,
+        performance_narrative: '',
+      };
+    });
+    setInlineKpiMap(map);
+  }, [selectedCompId, employees, kpiList, settings.period_year, settings.period_term]);
+
+  // Load Individual Employee Report Card & Attendance Summary when selectedReportEmpId changes
+  useEffect(() => {
+    const loadEmployeeReportCard = async () => {
+      if (!selectedReportEmpId || !isSupabaseConfigured()) return;
+      try {
+        const [report, allAtt] = await Promise.all([
+          SkenaHrApi.getEmployeeReport(selectedReportEmpId, settings.period_year, settings.period_term),
+          SkenaHrApi.getAllEmployeeAttendances(selectedReportEmpId),
+        ]);
+        setEmpReportAttendances(allAtt);
+        if (report) {
+          setEmpReportData(report);
+        } else {
+          setEmpReportData({
+            employee_id: selectedReportEmpId,
+            period_year: settings.period_year,
+            period_term: settings.period_term,
+            idp_lms_modules: [
+              {
+                module_name: 'Onboarding & Core Creative Workflow',
+                category: 'LMS Course',
+                target_date: todayStr,
+                status: 'Completed',
+                score: '88/100',
+              },
+            ],
+            behavioral_culture_notes: 'Menjaga etos kerja profesional, komunikatif dalam tim, dan disiplin terhadap tenggat waktu.',
+            hr_director_notes: 'Pertahankan konsistensi performa dan tingkatkan penguasaan manajemen beban kerja.',
+            talent_pipeline_box: 'Solid Professional (Key Contributor)',
+            career_decision: 'Retain Current Role',
+            next_role_assignment: '-',
+            report_date: todayStr,
+          });
+        }
+      } catch (err: any) {
+        triggerToast(`Gagal memuat rapor karyawan: ${err.message}`, 'error');
+      }
+    };
+    loadEmployeeReportCard();
+  }, [selectedReportEmpId, settings.period_year, settings.period_term]);
+
+  // Dashboard Metrics Calculations
+  const dashboardMetrics = useMemo(() => {
+    const activeEmployees = employees.filter((e) => e.is_active).length;
+    const todayAttList = Object.values(dailyAttendances);
+    const presentToday = todayAttList.filter((a) => a.status !== 'Cuti').length;
+    const attendanceRate = activeEmployees > 0 ? Math.round((presentToday / activeEmployees) * 100) : 0;
+
+    const avgKpi =
+      kpiList.length > 0
+        ? (
+            kpiList.reduce((acc, item) => {
+              const calc =
+                ((Number(item.kpi_q1) + Number(item.kpi_q2) + Number(item.kpi_q3) + Number(item.kpi_q4)) / 4) * 0.5 +
+                Number(item.mid_review_score) * 0.3 +
+                Number(item.final_project_score) * 0.2;
+              return acc + (item.final_kpi_score ?? calc);
+            }, 0) / kpiList.length
+          ).toFixed(1)
+        : '0.0';
+
+    return {
+      activeEmployees,
+      attendanceRate,
+      schedulesCount: schedules.length,
+      logsCount: activityLogs.length,
+      avgKpi,
+    };
+  }, [employees, dailyAttendances, schedules, activityLogs, kpiList]);
+
+  // Handlers for Module 1: Settings, Employee, Competency, CSV Import
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    try {
+      const saved = await SkenaHrApi.upsertSettings(settings);
+      setSettings(saved);
+      triggerToast('Pengaturan Perusahaan & HR berhasil disimpan ke Supabase!');
+    } catch (err: any) {
+      triggerToast(`Gagal menyimpan pengaturan: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSaveEmployee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!empForm.employee_nik || !empForm.full_name || !empForm.role_title) {
+      triggerToast('NIK, Nama Lengkap, dan Jabatan wajib diisi!', 'error');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      await SkenaHrApi.upsertEmployee(empForm);
+      const updated = await SkenaHrApi.getEmployees();
+      setEmployees(updated);
+      setEmpForm({
+        employee_nik: '',
+        tax_bpjs_id: '',
+        full_name: '',
+        gender: 'L',
+        role_title: '',
+        department: 'Creative Production',
+        employment_status: 'Full Time',
+        contract_duration: '12 Bulan',
+        benefits_package: 'BPJS Kesehatan & Ketenagakerjaan',
+        assigned_project: '',
+        work_location: 'Makassar HQ',
+        direct_supervisor: 'Managing Director',
+        is_active: true,
+      });
+      triggerToast('Data karyawan berhasil disimpan ke Supabase!');
+    } catch (err: any) {
+      triggerToast(`Gagal menyimpan karyawan: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCsvEmployeeImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsLoading(true);
+    try {
+      const text = await file.text();
+      const rows = text.split('\n').map((r) => r.trim()).filter(Boolean);
+      // Format CSV: NIK,Nama,L/P,Jabatan,Departemen,Status(Probation/Full Time/Full Time Performance Based/Freelance),Kontrak,Benefit,Project,Lokasi
+      const payloads: Partial<Employee>[] = rows.slice(1).map((row) => {
+        const cols = row.split(',').map((c) => c.trim());
+        return {
+          employee_nik: cols[0] || `SKN-${Math.floor(Math.random() * 9000 + 1000)}`,
+          full_name: cols[1] || 'Karyawan Baru',
+          gender: (cols[2] === 'P' ? 'P' : 'L') as 'L' | 'P',
+          role_title: cols[3] || 'Creative Staff',
+          department: cols[4] || 'Creative',
+          employment_status: (['Probation', 'Full Time', 'Full Time Performance Based', 'Freelance'].includes(cols[5])
+            ? cols[5]
+            : 'Full Time') as EmploymentStatus,
+          contract_duration: cols[6] || '12 Bulan',
+          benefits_package: cols[7] || 'BPJS Kesehatan & TK',
+          assigned_project: cols[8] || '-',
+          work_location: cols[9] || 'Makassar HQ',
+          is_active: true,
+        };
+      });
+      await SkenaHrApi.bulkInsertEmployees(payloads);
+      const updated = await SkenaHrApi.getEmployees();
+      setEmployees(updated);
+      triggerToast(`Berhasil mengimpor ${payloads.length} karyawan ke Supabase!`);
+    } catch (err: any) {
+      triggerToast(`Gagal impor CSV: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSaveCompetency = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!compForm.competency_code || !compForm.competency_name) return;
+    setIsLoading(true);
+    try {
+      await SkenaHrApi.createCompetency(compForm);
+      const updated = await SkenaHrApi.getCompetencies();
+      setCompetencies(updated);
+      setCompForm({
+        competency_code: '',
+        competency_name: '',
+        category: 'Core KPI',
+        target_threshold: 78,
+        standard_workload_hours: 40,
+      });
+      triggerToast('Kamus Kompetensi & KPI berhasil ditambahkan ke Supabase!');
+    } catch (err: any) {
+      triggerToast(`Gagal menambah kompetensi: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Module 3: Set All WFO (1-Click) & Batch Upsert
+  const handleSetAllWfo = () => {
+    const updated: Record<string, AttendanceRecord> = {};
+    employees.forEach((emp) => {
+      updated[emp.id] = {
+        employee_id: emp.id,
+        attendance_date: selectedDate,
+        status: 'WFO',
+        work_location_tag: emp.work_location || 'Makassar HQ',
+        notes: 'Hadir Tepat Waktu (WFO)',
+      };
+    });
+    setDailyAttendances(updated);
+    triggerToast('Seluruh karyawan diset WFO. Klik "Simpan Presensi Serentak" untuk menyimpan ke cloud.');
+  };
+
+  const handleBatchSaveAttendance = async () => {
+    setIsLoading(true);
+    try {
+      const records = Object.values(dailyAttendances);
+      await SkenaHrApi.batchUpsertAttendances(records);
+      await fetchMonthlyAttendance(attendanceMonth);
+      triggerToast(`Presensi tanggal ${selectedDate} (${records.length} karyawan) tersimpan di Supabase!`);
+    } catch (err: any) {
+      triggerToast(`Gagal menyimpan presensi: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Export Monthly Attendance to CSV/Excel
+  const handleExportMonthlyCsv = () => {
+    const headers = ['NIK', 'Nama Karyawan', 'Status Kontrak', 'Total WFO', 'Total WFH', 'Total Take Content', 'Total Cuti', 'Persentase Kehadiran Aktif'];
+    const rows = employees.map((emp) => {
+      const empRecs = monthlyAttendances.filter((r) => r.employee_id === emp.id);
+      const wfo = empRecs.filter((r) => r.status === 'WFO').length;
+      const wfh = empRecs.filter((r) => r.status === 'WFH').length;
+      const content = empRecs.filter((r) => r.status === 'Take Content').length;
+      const cuti = empRecs.filter((r) => r.status === 'Cuti').length;
+      const totalActive = wfo + wfh + content;
+      const totalLogged = totalActive + cuti;
+      const pct = totalLogged > 0 ? Math.round((totalActive / totalLogged) * 100) : 100;
+      return [emp.employee_nik, `"${emp.full_name}"`, emp.employment_status, wfo, wfh, content, cuti, `${pct}%`].join(',');
+    });
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `Rekap_Presensi_Skena_${attendanceMonth}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Module 5: Inline KPI Calculation & Auto Competency Narrative Generator
+  const calculateRowScore = (row: KpiEvaluation): number => {
+    const qAvg = (Number(row.kpi_q1) + Number(row.kpi_q2) + Number(row.kpi_q3) + Number(row.kpi_q4)) / 4.0;
+    return Number((qAvg * 0.5 + Number(row.mid_review_score) * 0.3 + Number(row.final_project_score) * 0.2).toFixed(2));
+  };
+
+  const generateAutoNarrative = (emp: Employee, row: KpiEvaluation) => {
+    const score = calculateRowScore(row);
+    const comp = competencies.find((c) => c.id === selectedCompId);
+    const threshold = comp?.target_threshold || 75;
+    const skillLabels: Record<number, string> = {
+      1: 'Novice (Dasar)',
+      2: 'Advanced Beginner',
+      3: 'Competent (Mandiri)',
+      4: 'Proficient (Mahir)',
+      5: 'Expert (Master/Mentor)',
+    };
+    const workloadStatus =
+      row.workload_percentage > 100
+        ? 'Overload (Perlu Redistribusi Tugas)'
+        : row.workload_percentage >= 80
+        ? 'Optimal & Produktif'
+        : 'Under-utilized (Dapat Diberi Proyek Tambahan)';
+
+    const narrative =
+      score >= threshold
+        ? `Melampaui standar target pada kompetensi "${comp?.competency_name}" (Skor: ${score}). Penguasaan berada di level ${
+            skillLabels[row.current_skill_level] || 'Competent'
+          } dengan kapasitas beban kerja ${row.workload_percentage}% (${workloadStatus}).`
+        : `Perlu pendampingan (Individual Development Plan) pada kompetensi "${comp?.competency_name}" (Skor: ${score} < Target ${threshold}). Level kecakapan saat ini ${
+            skillLabels[row.current_skill_level] || 'Dasar'
+          } dengan beban kerja ${row.workload_percentage}% (${workloadStatus}).`;
+
+    setInlineKpiMap((prev) => ({
+      ...prev,
+      [emp.id]: { ...prev[emp.id], performance_narrative: narrative },
+    }));
+  };
+
+  const handleSaveSingleKpiRow = async (empId: string) => {
+    const row = inlineKpiMap[empId];
+    if (!row) return;
+    setIsLoading(true);
+    try {
+      await SkenaHrApi.upsertKpiEvaluation(row);
+      const refreshed = await SkenaHrApi.getKpiEvaluations(settings.period_year, settings.period_term);
+      setKpiList(refreshed);
+      triggerToast('Evaluasi KPI, Skill & Workload berhasil disimpan ke Supabase!');
+    } catch (err: any) {
+      triggerToast(`Gagal menyimpan KPI: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col md:flex-row font-sans">
+      {/* CSS KHUSUS CETAK A4 PRESISI TANPA MEMOTONG TABEL */}
+      <style>{`
+        @media print {
+          @page {
+            size: A4 portrait;
+            margin: 12mm;
+          }
+          body {
+            background: #ffffff !important;
+            color: #000000 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          .no-print {
+            display: none !important;
+          }
+          .print-area {
+            width: 100% !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            box-shadow: none !important;
+            border: none !important;
+          }
+          table {
+            page-break-inside: auto;
+            border-collapse: collapse !important;
+            width: 100% !important;
+          }
+          tr {
+            page-break-inside: avoid;
+            page-break-after: auto;
+          }
+          thead {
+            display: table-header-group;
+          }
+        }
+      `}</style>
+
+      {/* TOAST NOTIFICATION */}
+      {toast && (
+        <div
+          className={`fixed bottom-5 right-5 z-50 flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-xl text-white font-medium transition-all no-print ${
+            toast.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'
+          }`}
+        >
+          {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+          <span>{toast.message}</span>
+        </div>
+      )}
+
+      {/* MODAL KONFIGURASI SUPABASE (IN-MEMORY RUNTIME) */}
+      {showConnModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4 no-print">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex items-center gap-3 text-[#1E40AF] mb-3">
+              <Database className="w-7 h-7" />
+              <h2 className="text-xl font-bold">Koneksi Cloud Supabase</h2>
+            </div>
+            <p className="text-sm text-slate-600 mb-4 leading-relaxed">
+              Aplikasi <strong>Skena HR Management</strong> mematuhi protokol <em>Zero LocalStorage</em>. Masukkan{' '}
+              <code>VITE_SUPABASE_URL</code> dan <code>VITE_SUPABASE_ANON_KEY</code> proyek Anda untuk terhubung langsung ke PostgreSQL.
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Supabase Project URL</label>
+                <input
+                  type="url"
+                  placeholder="https://xyzcompany.supabase.co"
+                  value={connUrl}
+                  onChange={(e) => setConnUrl(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm focus:ring-2 focus:ring-blue-600 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Supabase Anon Public Key</label>
+                <input
+                  type="password"
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  value={connKey}
+                  onChange={(e) => setConnKey(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm focus:ring-2 focus:ring-blue-600 outline-none"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                {isSupabaseConfigured() && (
+                  <button
+                    onClick={() => setShowConnModal(false)}
+                    className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100"
+                  >
+                    Tutup
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    if (!connUrl || !connKey) {
+                      triggerToast('Harap isi URL dan Anon Key Supabase!', 'error');
+                      return;
+                    }
+                    initSupabaseRuntime(connUrl, connKey);
+                    setShowConnModal(false);
+                    fetchMasterData();
+                    triggerToast('Terhubung ke Cloud Supabase secara Real-Time!');
+                  }}
+                  className="px-5 py-2.5 rounded-lg text-sm font-semibold bg-[#1E40AF] text-white hover:bg-blue-800 shadow-md"
+                >
+                  Hubungkan & Muat Data
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SIDEBAR NAVIGASI RESPONSIF */}
+      <aside className="w-full md:w-72 bg-[#1E40AF] text-white flex flex-col justify-between shrink-0 no-print shadow-xl">
+        <div>
+          <div className="p-6 border-b border-blue-800/80">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-[#10B981] text-white font-black text-lg shadow-md">SK</div>
+              <div>
+                <h1 className="font-bold text-lg tracking-tight leading-none">Skena HRIS</h1>
+                <p className="text-xs text-blue-200 mt-1">People, KPI & Talent Cloud</p>
+              </div>
+            </div>
+          </div>
+
+          <nav className="p-4 space-y-1.5">
+            {[
+              { id: 'dashboard', label: '1. Dashboard & Master HR', icon: Users },
+              { id: 'schedules', label: '2. Jadwal Kerja & Produksi', icon: Calendar },
+              { id: 'attendance', label: '3. Presensi (WFO/WFH/Content)', icon: CheckSquare },
+              { id: 'logs', label: '4. Jurnal Sprint & LMS Log', icon: BookOpen },
+              { id: 'kpi_workload', label: '5. Evaluasi KPI & Workload', icon: BarChart3 },
+              { id: 'report_card', label: '6. Rapor Karyawan & IDP (A4)', icon: FileText },
+            ].map((item) => {
+              const Icon = item.icon;
+              const active = activeModule === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setActiveModule(item.id as ActiveModule)}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
+                    active ? 'bg-[#10B981] text-white shadow-lg font-semibold' : 'text-blue-100 hover:bg-blue-800/60'
+                  }`}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="text-left">{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+
+        <div className="p-4 border-t border-blue-800/80 space-y-2">
+          <div className="bg-blue-950/60 rounded-xl p-3 text-xs space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-blue-300">Status Cloud DB:</span>
+              <span className="inline-flex items-center gap-1 font-semibold text-emerald-400">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                {isSupabaseConfigured() ? 'Online' : 'Belum Diatur'}
+              </span>
+            </div>
+            <div className="text-blue-200 truncate">{settings.company_name}</div>
+          </div>
+          <button
+            onClick={() => setShowConnModal(true)}
+            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-blue-800/80 hover:bg-blue-700 text-xs font-medium transition"
+          >
+            <Settings className="w-3.5 h-3.5" /> Pengaturan Koneksi Supabase
+          </button>
+        </div>
+      </aside>
+
+      {/* KONTEN UTAMA */}
+      <main className="flex-1 p-4 md:p-8 overflow-y-auto">
+        {/* TOP HEADER BAR */}
+        <header className="flex flex-wrap items-center justify-between gap-4 pb-6 mb-6 border-b border-slate-200 no-print">
+          <div>
+            <h2 className="text-2xl font-bold text-slate-900">{settings.company_name} — HR Management</h2>
+            <p className="text-sm text-slate-500">
+              Periode Evaluasi: <span className="font-semibold text-slate-700">{settings.period_year} ({settings.period_term})</span> •
+              Lead HR: <span className="font-semibold text-slate-700">{settings.hr_lead_name}</span>
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {isLoading && (
+              <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#1E40AF] bg-blue-50 px-3 py-1.5 rounded-full border border-blue-200">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Sinkronisasi Supabase...
+              </span>
+            )}
+            <button
+              onClick={fetchMasterData}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-medium hover:bg-slate-100 shadow-sm"
+            >
+              <RefreshCw className="w-4 h-4" /> Refresh Cloud
+            </button>
+          </div>
+        </header>
+
+        {/* ===================================================================
+            MODUL 1: DASHBOARD, PENGATURAN HR, KARYAWAN (4 KONTRAK), & KOMPETENSI
+           =================================================================== */}
+        {activeModule === 'dashboard' && (
+          <div className="space-y-8">
+            {/* KARTU METRIK REAL-TIME */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                <span className="text-xs font-semibold uppercase text-slate-400">Total Karyawan Aktif</span>
+                <div className="text-3xl font-black text-[#1E40AF] mt-1">{dashboardMetrics.activeEmployees}</div>
+                <span className="text-xs text-slate-500 mt-1 block">Terdaftar di Supabase</span>
+              </div>
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                <span className="text-xs font-semibold uppercase text-slate-400">Kehadiran Hari Ini</span>
+                <div className="text-3xl font-black text-[#10B981] mt-1">{dashboardMetrics.attendanceRate}%</div>
+                <span className="text-xs text-slate-500 mt-1 block">WFO, WFH & Take Content</span>
+              </div>
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                <span className="text-xs font-semibold uppercase text-slate-400">Slot Jadwal & Shift</span>
+                <div className="text-3xl font-black text-slate-800 mt-1">{dashboardMetrics.schedulesCount}</div>
+                <span className="text-xs text-slate-500 mt-1 block">Agenda Produksi & Sprint</span>
+              </div>
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                <span className="text-xs font-semibold uppercase text-slate-400">Jurnal Sprint & LMS</span>
+                <div className="text-3xl font-black text-slate-800 mt-1">{dashboardMetrics.logsCount}</div>
+                <span className="text-xs text-slate-500 mt-1 block">Log Aktivitas Tersimpan</span>
+              </div>
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                <span className="text-xs font-semibold uppercase text-slate-400">Rata-rata Skor KPI</span>
+                <div className="text-3xl font-black text-[#1E40AF] mt-1">{dashboardMetrics.avgKpi}</div>
+                <span className="text-xs text-slate-500 mt-1 block">Skala Kumulatif 0 - 100</span>
+              </div>
+            </div>
+
+            {/* FORM PENGATURAN IDENTITAS PERUSAHAAN & HR */}
+            <form onSubmit={handleSaveSettings} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <div className="flex items-center justify-between border-b pb-3">
+                <h3 className="font-bold text-lg text-slate-800">Pengaturan Identitas Organisasi, HR & Managing Director</h3>
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1E40AF] text-white text-sm font-semibold hover:bg-blue-800"
+                >
+                  <Save className="w-4 h-4" /> Simpan Identitas
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Nama Perusahaan / Agensi</label>
+                  <input
+                    type="text"
+                    value={settings.company_name}
+                    onChange={(e) => setSettings({ ...settings, company_name: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Tahun Evaluasi</label>
+                  <input
+                    type="text"
+                    value={settings.period_year}
+                    onChange={(e) => setSettings({ ...settings, period_year: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Periode / Kuartal</label>
+                  <input
+                    type="text"
+                    value={settings.period_term}
+                    onChange={(e) => setSettings({ ...settings, period_term: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Cakupan Departemen</label>
+                  <input
+                    type="text"
+                    value={settings.department_scope}
+                    onChange={(e) => setSettings({ ...settings, department_scope: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Nama HR Lead / Generalist</label>
+                  <input
+                    type="text"
+                    value={settings.hr_lead_name}
+                    onChange={(e) => setSettings({ ...settings, hr_lead_name: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">ID / NIK HR Lead</label>
+                  <input
+                    type="text"
+                    value={settings.hr_lead_id}
+                    onChange={(e) => setSettings({ ...settings, hr_lead_id: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Nama Managing Director</label>
+                  <input
+                    type="text"
+                    value={settings.managing_director_name}
+                    onChange={(e) => setSettings({ ...settings, managing_director_name: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">ID / NIK Managing Director</label>
+                  <input
+                    type="text"
+                    value={settings.managing_director_id}
+                    onChange={(e) => setSettings({ ...settings, managing_director_id: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+              </div>
+            </form>
+
+            {/* CRUD DATA KARYAWAN & SKEMA KONTRAK DINAMIS */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-3">
+                <div>
+                  <h3 className="font-bold text-lg text-slate-800">Manajemen Karyawan & Skema Kontrak Spesifik</h3>
+                  <p className="text-xs text-slate-500">
+                    Mendukung status: <strong>Probation</strong>, <strong>Full Time</strong> (Kontrak & Benefit),{' '}
+                    <strong>Full Time Performance Based</strong> (Kontrak, Project, Lokasi), dan <strong>Freelance</strong> (Waktu, Project, Lokasi).
+                  </p>
+                </div>
+                <label className="cursor-pointer inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold hover:bg-emerald-100">
+                  <Upload className="w-4 h-4" /> Import CSV ke Supabase
+                  <input type="file" accept=".csv" onChange={handleCsvEmployeeImport} className="hidden" />
+                </label>
+              </div>
+
+              <form onSubmit={handleSaveEmployee} className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">NIK Karyawan *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="SKN-2026-001"
+                    value={empForm.employee_nik}
+                    onChange={(e) => setEmpForm({ ...empForm, employee_nik: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Nama Lengkap *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Nama Lengkap"
+                    value={empForm.full_name}
+                    onChange={(e) => setEmpForm({ ...empForm, full_name: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Jabatan / Role *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Creative Strategist / Video Editor"
+                    value={empForm.role_title}
+                    onChange={(e) => setEmpForm({ ...empForm, role_title: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Status Kontrak Kerja *</label>
+                  <select
+                    value={empForm.employment_status}
+                    onChange={(e) => setEmpForm({ ...empForm, employment_status: e.target.value as EmploymentStatus })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm bg-white font-semibold text-[#1E40AF]"
+                  >
+                    <option value="Probation">Probation</option>
+                    <option value="Full Time">Full Time (Waktu Kontrak + Benefit)</option>
+                    <option value="Full Time Performance Based">Full Time Performance Based (Kontrak + Project + Lokasi)</option>
+                    <option value="Freelance">Freelance (Waktu + Project + Lokasi)</option>
+                  </select>
+                </div>
+
+                {/* Kolom Dinamis Sesuai Status Karyawan */}
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Durasi / Waktu Kontrak</label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: 12 Bulan / 3 Bulan Probation"
+                    value={empForm.contract_duration}
+                    onChange={(e) => setEmpForm({ ...empForm, contract_duration: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm bg-white"
+                  />
+                </div>
+
+                {(empForm.employment_status === 'Full Time' || empForm.employment_status === 'Probation') && (
+                  <div className="md:col-span-2">
+                    <label className="text-xs font-semibold text-emerald-700">Paket Benefit (BPJS Kesehatan, TK, Tunjangan)</label>
+                    <input
+                      type="text"
+                      placeholder="BPJS Kes & TK, Tunjangan Makan, Insentif Tahunan"
+                      value={empForm.benefits_package}
+                      onChange={(e) => setEmpForm({ ...empForm, benefits_package: e.target.value })}
+                      className="w-full mt-1 px-3 py-2 border border-emerald-300 rounded-lg text-sm bg-white"
+                    />
+                  </div>
+                )}
+
+                {(empForm.employment_status === 'Full Time Performance Based' || empForm.employment_status === 'Freelance') && (
+                  <>
+                    <div>
+                      <label className="text-xs font-semibold text-blue-700">Handle Project Spesifik</label>
+                      <input
+                        type="text"
+                        placeholder="Campaign Brand X / Social Media Retainer"
+                        value={empForm.assigned_project}
+                        onChange={(e) => setEmpForm({ ...empForm, assigned_project: e.target.value })}
+                        className="w-full mt-1 px-3 py-2 border border-blue-300 rounded-lg text-sm bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-blue-700">Lokasi Penugasan</label>
+                      <input
+                        type="text"
+                        placeholder="Makassar Studio / On-Site Client / Remote"
+                        value={empForm.work_location}
+                        onChange={(e) => setEmpForm({ ...empForm, work_location: e.target.value })}
+                        className="w-full mt-1 px-3 py-2 border border-blue-300 rounded-lg text-sm bg-white"
+                      />
+                    </div>
+                  </>
+                )}
+
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[#10B981] text-white text-sm font-semibold hover:bg-emerald-600 shadow"
+                  >
+                    <Plus className="w-4 h-4" /> Tambah / Update Karyawan
+                  </button>
+                </div>
+              </form>
+
+              {/* Tabel Karyawan */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-600 text-xs uppercase">
+                      <th className="p-3 border-b">NIK & Nama</th>
+                      <th className="p-3 border-b">Jabatan</th>
+                      <th className="p-3 border-b">Status Kontrak</th>
+                      <th className="p-3 border-b">Detail Kontrak (Waktu / Benefit / Project & Lokasi)</th>
+                      <th className="p-3 border-b text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {employees.map((emp) => (
+                      <tr key={emp.id} className="hover:bg-slate-50">
+                        <td className="p-3">
+                          <div className="font-bold text-slate-900">{emp.full_name}</div>
+                          <div className="text-xs text-slate-500">{emp.employee_nik}</div>
+                        </td>
+                        <td className="p-3">{emp.role_title}</td>
+                        <td className="p-3">
+                          <span
+                            className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold ${
+                              emp.employment_status === 'Full Time'
+                                ? 'bg-blue-100 text-blue-800'
+                                : emp.employment_status === 'Full Time Performance Based'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : emp.employment_status === 'Probation'
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-purple-100 text-purple-800'
+                            }`}
+                          >
+                            {emp.employment_status}
+                          </span>
+                        </td>
+                        <td className="p-3 text-xs space-y-0.5">
+                          <div>
+                            <strong>Waktu:</strong> {emp.contract_duration || '-'}
+                          </div>
+                          {emp.employment_status === 'Full Time' && (
+                            <div className="text-emerald-700">
+                              <strong>Benefit:</strong> {emp.benefits_package || '-'}
+                            </div>
+                          )}
+                          {(emp.employment_status === 'Full Time Performance Based' || emp.employment_status === 'Freelance') && (
+                            <div className="text-blue-700">
+                              <strong>Project:</strong> {emp.assigned_project || '-'} | <strong>Lokasi:</strong> {emp.work_location || '-'}
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={async () => {
+                              await SkenaHrApi.deleteEmployee(emp.id);
+                              setEmployees(await SkenaHrApi.getEmployees());
+                              triggerToast('Karyawan dihapus dari Supabase');
+                            }}
+                            className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {employees.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="p-6 text-center text-slate-400">
+                          Belum ada data karyawan di Supabase. Silakan tambahkan melalui form di atas.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* CRUD KAMUS KOMPETENSI (HARD SKILL, SOFT SKILL, CORE KPI) */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <h3 className="font-bold text-lg text-slate-800">Kamus Kompetensi (Hard Skill, Soft Skill & Indikator KPI)</h3>
+              <form onSubmit={handleSaveCompetency} className="grid grid-cols-1 md:grid-cols-5 gap-3 bg-slate-50 p-4 rounded-xl border">
+                <input
+                  type="text"
+                  required
+                  placeholder="Kode (Contoh: KPI-01 / HS-02)"
+                  value={compForm.competency_code}
+                  onChange={(e) => setCompForm({ ...compForm, competency_code: e.target.value })}
+                  className="px-3 py-2 border rounded-lg text-sm bg-white"
+                />
+                <input
+                  type="text"
+                  required
+                  placeholder="Nama Kompetensi / KPI"
+                  value={compForm.competency_name}
+                  onChange={(e) => setCompForm({ ...compForm, competency_name: e.target.value })}
+                  className="px-3 py-2 border rounded-lg text-sm bg-white md:col-span-2"
+                />
+                <select
+                  value={compForm.category}
+                  onChange={(e) => setCompForm({ ...compForm, category: e.target.value as any })}
+                  className="px-3 py-2 border rounded-lg text-sm bg-white"
+                >
+                  <option value="Core KPI">Core KPI</option>
+                  <option value="Hard Skill">Hard Skill</option>
+                  <option value="Soft Skill">Soft Skill</option>
+                </select>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    placeholder="Target Min"
+                    value={compForm.target_threshold}
+                    onChange={(e) => setCompForm({ ...compForm, target_threshold: Number(e.target.value) })}
+                    className="w-24 px-3 py-2 border rounded-lg text-sm bg-white"
+                  />
+                  <button type="submit" className="flex-1 bg-[#1E40AF] text-white rounded-lg text-sm font-semibold px-3 py-2 hover:bg-blue-800">
+                    Tambah
+                  </button>
+                </div>
+              </form>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {competencies.map((c) => (
+                  <div key={c.id} className="p-3.5 rounded-xl border border-slate-200 flex items-center justify-between bg-white">
+                    <div>
+                      <span className="text-xs font-bold px-2 py-0.5 rounded bg-blue-50 text-[#1E40AF]">{c.competency_code}</span>
+                      <span className="ml-2 text-xs text-slate-500">{c.category}</span>
+                      <h4 className="font-semibold text-sm mt-1">{c.competency_name}</h4>
+                      <p className="text-xs text-slate-500">Passing Threshold: {c.target_threshold}</p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        await SkenaHrApi.deleteCompetency(c.id);
+                        setCompetencies(await SkenaHrApi.getCompetencies());
+                        triggerToast('Kompetensi dihapus');
+                      }}
+                      className="text-rose-500 hover:bg-rose-50 p-1.5 rounded-lg"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================
+            MODUL 2: JADWAL KERJA, PRODUKSI KONTEN & SPRINT MINGGUAN
+           =================================================================== */}
+        {activeModule === 'schedules' && (
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <h3 className="font-bold text-lg text-slate-800">Tambah Jadwal Sprint, Produksi Konten & Sesi LMS</h3>
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!schedForm.competency_id) {
+                    triggerToast('Pilih fokus kompetensi/KPI terlebih dahulu!', 'error');
+                    return;
+                  }
+                  setIsLoading(true);
+                  try {
+                    await SkenaHrApi.createSchedule(schedForm);
+                    setSchedules(await SkenaHrApi.getSchedules());
+                    triggerToast('Jadwal berhasil ditambahkan ke Supabase!');
+                  } catch (err: any) {
+                    triggerToast(err.message, 'error');
+                  } finally {
+                    setIsLoading(false);
+                  }
+                }}
+                className="grid grid-cols-1 md:grid-cols-6 gap-3"
+              >
+                <select
+                  value={schedForm.day_of_week}
+                  onChange={(e) => setSchedForm({ ...schedForm, day_of_week: e.target.value })}
+                  className="px-3 py-2 border rounded-lg text-sm"
+                >
+                  {['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'].map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="time"
+                  value={schedForm.start_time}
+                  onChange={(e) => setSchedForm({ ...schedForm, start_time: e.target.value })}
+                  className="px-3 py-2 border rounded-lg text-sm"
+                />
+                <input
+                  type="time"
+                  value={schedForm.end_time}
+                  onChange={(e) => setSchedForm({ ...schedForm, end_time: e.target.value })}
+                  className="px-3 py-2 border rounded-lg text-sm"
+                />
+                <input
+                  type="text"
+                  placeholder="Nama Sesi / Shift"
+                  value={schedForm.shift_code}
+                  onChange={(e) => setSchedForm({ ...schedForm, shift_code: e.target.value })}
+                  className="px-3 py-2 border rounded-lg text-sm"
+                />
+                <select
+                  value={schedForm.competency_id}
+                  onChange={(e) => setSchedForm({ ...schedForm, competency_id: e.target.value })}
+                  className="px-3 py-2 border rounded-lg text-sm"
+                >
+                  <option value="">-- Pilih Fokus Kompetensi --</option>
+                  {competencies.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.competency_name}
+                    </option>
+                  ))}
+                </select>
+                <button type="submit" className="bg-[#1E40AF] text-white rounded-lg text-sm font-semibold px-4 py-2 hover:bg-blue-800">
+                  + Simpan Jadwal
+                </button>
+              </form>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'].map((day) => {
+                const dayScheds = schedules.filter((s) => s.day_of_week === day);
+                return (
+                  <div key={day} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                    <div className="bg-[#1E40AF] text-white px-4 py-2.5 font-bold text-sm flex justify-between items-center">
+                      <span>{day}</span>
+                      <span className="text-xs bg-blue-800 px-2 py-0.5 rounded-full">{dayScheds.length} Agenda</span>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      {dayScheds.map((item) => (
+                        <div key={item.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
+                          <div className="flex justify-between items-start">
+                            <span className="text-xs font-bold text-[#10B981]">
+                              {item.start_time.slice(0, 5)} - {item.end_time.slice(0, 5)} ({item.shift_code})
+                            </span>
+                            <button
+                              onClick={async () => {
+                                await SkenaHrApi.deleteSchedule(item.id);
+                                setSchedules(await SkenaHrApi.getSchedules());
+                              }}
+                              className="text-rose-500 hover:text-rose-700"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          <div className="font-semibold text-sm text-slate-800">{item.competencies?.competency_name}</div>
+                          <div className="text-xs text-slate-500">{item.location_agenda_notes}</div>
+                          <button
+                            onClick={() => {
+                              setLogForm((prev) => ({
+                                ...prev,
+                                schedule_id: item.id,
+                                competency_id: item.competency_id,
+                                sprint_session_info: `${item.shift_code} (${item.start_time.slice(0, 5)} - ${item.end_time.slice(0, 5)})`,
+                              }));
+                              syncAttendanceToLogDate(todayStr);
+                              setActiveModule('logs');
+                            }}
+                            className="w-full py-1.5 px-3 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                          >
+                            Isi Jurnal Sprint / LMS Sekarang →
+                          </button>
+                        </div>
+                      ))}
+                      {dayScheds.length === 0 && <p className="text-xs text-slate-400 text-center py-4">Belum ada jadwal</p>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================
+            MODUL 3: PRESENSI HARIAN (WFO, WFH, TAKE CONTENT, CUTI) & REKAP BULANAN
+           =================================================================== */}
+        {activeModule === 'attendance' && (
+          <div className="space-y-6">
+            <div className="flex gap-2">
+              <button
+                onClick={() => setAttendanceSubTab('daily')}
+                className={`px-4 py-2 rounded-xl text-sm font-semibold ${
+                  attendanceSubTab === 'daily' ? 'bg-[#1E40AF] text-white' : 'bg-white border text-slate-700'
+                }`}
+              >
+                Input Presensi Harian
+              </button>
+              <button
+                onClick={() => setAttendanceSubTab('monthly')}
+                className={`px-4 py-2 rounded-xl text-sm font-semibold ${
+                  attendanceSubTab === 'monthly' ? 'bg-[#1E40AF] text-white' : 'bg-white border text-slate-700'
+                }`}
+              >
+                Matriks Rekapitulasi Bulanan
+              </button>
+            </div>
+
+            {attendanceSubTab === 'daily' ? (
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b pb-4">
+                  <div className="flex items-center gap-3">
+                    <label className="text-sm font-bold text-slate-700">Tanggal Presensi:</label>
+                    <input
+                      type="date"
+                      value={selectedDate}
+                      onChange={(e) => {
+                        setSelectedDate(e.target.value);
+                        fetchDailyAttendance(e.target.value);
+                      }}
+                      className="px-3 py-2 border rounded-xl text-sm font-semibold"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleSetAllWfo}
+                      className="px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 text-sm font-semibold hover:bg-emerald-100"
+                    >
+                      Set Semua WFO (1-Klik)
+                    </button>
+                    <button
+                      onClick={handleBatchSaveAttendance}
+                      className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-[#1E40AF] text-white text-sm font-semibold hover:bg-blue-800 shadow"
+                    >
+                      <Save className="w-4 h-4" /> Simpan Presensi Serentak (Batch Upsert)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left">
+                    <thead>
+                      <tr className="bg-slate-100 text-slate-600 text-xs uppercase">
+                        <th className="p-3">Karyawan & Kontrak</th>
+                        <th className="p-3">Mode Kehadiran (WFO / WFH / Take Content / Cuti)</th>
+                        <th className="p-3">Tag Lokasi Kerja / Produksi</th>
+                        <th className="p-3">Catatan Aktivitas / Keterangan</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {employees.map((emp) => {
+                        const rec = dailyAttendances[emp.id] || {
+                          employee_id: emp.id,
+                          attendance_date: selectedDate,
+                          status: 'WFO',
+                          work_location_tag: emp.work_location || 'Makassar HQ',
+                          notes: '',
+                        };
+                        return (
+                          <tr key={emp.id} className="hover:bg-slate-50">
+                            <td className="p-3">
+                              <div className="font-bold">{emp.full_name}</div>
+                              <div className="text-xs text-slate-500">
+                                {emp.role_title} • <span className="text-blue-700 font-medium">{emp.employment_status}</span>
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              <div className="flex flex-wrap gap-1.5">
+                                {(['WFO', 'WFH', 'Take Content', 'Cuti'] as AttendanceStatus[]).map((st) => (
+                                  <button
+                                    key={st}
+                                    type="button"
+                                    onClick={() =>
+                                      setDailyAttendances((prev) => ({
+                                        ...prev,
+                                        [emp.id]: { ...rec, status: st },
+                                      }))
+                                    }
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                                      rec.status === st
+                                        ? st === 'WFO'
+                                          ? 'bg-[#1E40AF] text-white'
+                                          : st === 'WFH'
+                                          ? 'bg-[#10B981] text-white'
+                                          : st === 'Take Content'
+                                          ? 'bg-purple-600 text-white'
+                                          : 'bg-rose-600 text-white'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    }`}
+                                  >
+                                    {st}
+                                  </button>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              <input
+                                type="text"
+                                value={rec.work_location_tag || ''}
+                                onChange={(e) =>
+                                  setDailyAttendances((prev) => ({
+                                    ...prev,
+                                    [emp.id]: { ...rec, work_location_tag: e.target.value },
+                                  }))
+                                }
+                                placeholder="Lokasi WFO / Lokasi Liputan"
+                                className="w-full px-2.5 py-1.5 border rounded-lg text-xs"
+                              />
+                            </td>
+                            <td className="p-3">
+                              <input
+                                type="text"
+                                value={rec.notes || ''}
+                                onChange={(e) =>
+                                  setDailyAttendances((prev) => ({
+                                    ...prev,
+                                    [emp.id]: { ...rec, notes: e.target.value },
+                                  }))
+                                }
+                                placeholder="Output harian / Alasan cuti"
+                                className="w-full px-2.5 py-1.5 border rounded-lg text-xs"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b pb-4">
+                  <div className="flex items-center gap-3">
+                    <label className="text-sm font-bold">Pilih Bulan Rekap:</label>
+                    <input
+                      type="month"
+                      value={attendanceMonth}
+                      onChange={(e) => {
+                        setAttendanceMonth(e.target.value);
+                        fetchMonthlyAttendance(e.target.value);
+                      }}
+                      className="px-3 py-2 border rounded-xl text-sm font-semibold"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleExportMonthlyCsv}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#10B981] text-white text-sm font-semibold hover:bg-emerald-600"
+                    >
+                      <Download className="w-4 h-4" /> Ekspor Matriks Excel/CSV
+                    </button>
+                    <button
+                      onClick={() => window.print()}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1E40AF] text-white text-sm font-semibold hover:bg-blue-800"
+                    >
+                      <Printer className="w-4 h-4" /> Cetak PDF
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto print-area">
+                  <table className="w-full text-sm text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-100 text-slate-700 text-xs uppercase">
+                        <th className="p-3 border">NIK</th>
+                        <th className="p-3 border">Nama Karyawan</th>
+                        <th className="p-3 border">Status Kontrak</th>
+                        <th className="p-3 border text-center">WFO</th>
+                        <th className="p-3 border text-center">WFH</th>
+                        <th className="p-3 border text-center">Take Content</th>
+                        <th className="p-3 border text-center">Cuti</th>
+                        <th className="p-3 border text-center">Tingkat Kehadiran Produktif</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {employees.map((emp) => {
+                        const recs = monthlyAttendances.filter((r) => r.employee_id === emp.id);
+                        const wfo = recs.filter((r) => r.status === 'WFO').length;
+                        const wfh = recs.filter((r) => r.status === 'WFH').length;
+                        const content = recs.filter((r) => r.status === 'Take Content').length;
+                        const cuti = recs.filter((r) => r.status === 'Cuti').length;
+                        const activeDays = wfo + wfh + content;
+                        const total = activeDays + cuti;
+                        const pct = total > 0 ? Math.round((activeDays / total) * 100) : 100;
+                        return (
+                          <tr key={emp.id}>
+                            <td className="p-2.5 border font-mono text-xs">{emp.employee_nik}</td>
+                            <td className="p-2.5 border font-semibold">{emp.full_name}</td>
+                            <td className="p-2.5 border text-xs">{emp.employment_status}</td>
+                            <td className="p-2.5 border text-center font-bold text-blue-700">{wfo}</td>
+                            <td className="p-2.5 border text-center font-bold text-emerald-700">{wfh}</td>
+                            <td className="p-2.5 border text-center font-bold text-purple-700">{content}</td>
+                            <td className="p-2.5 border text-center font-bold text-rose-600">{cuti}</td>
+                            <td className="p-2.5 border text-center font-black">{pct}%</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===================================================================
+            MODUL 4: JURNAL SPRINT HARIAN, LOG PRODUKSI & LMS (SINKRON PRESENSI)
+           =================================================================== */}
+        {activeModule === 'logs' && (
+          <div className="space-y-6">
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setIsLoading(true);
+                try {
+                  await SkenaHrApi.createActivityLog(logForm);
+                  setActivityLogs(await SkenaHrApi.getActivityLogs());
+                  triggerToast('Jurnal Sprint & LMS berhasil disimpan ke Supabase!');
+                } catch (err: any) {
+                  triggerToast(err.message, 'error');
+                } finally {
+                  setIsLoading(false);
+                }
+              }}
+              className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 no-print"
+            >
+              <h3 className="font-bold text-lg text-slate-800">Input Jurnal Aktivitas Sprint, LMS & Evaluasi Operasional Harian</h3>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Tanggal Log (Auto-Sync Presensi)</label>
+                  <input
+                    type="date"
+                    value={logForm.log_date}
+                    onChange={(e) => syncAttendanceToLogDate(e.target.value)}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Sesi Sprint / Jam Kerja</label>
+                  <input
+                    type="text"
+                    value={logForm.sprint_session_info}
+                    onChange={(e) => setLogForm({ ...logForm, sprint_session_info: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Kompetensi / KPI Terkait</label>
+                  <select
+                    value={logForm.competency_id}
+                    onChange={(e) => setLogForm({ ...logForm, competency_id: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  >
+                    {competencies.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.competency_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-emerald-50 p-2 rounded-lg border border-emerald-200 text-center">
+                    <span className="text-[11px] font-bold text-emerald-700 block">Tim Aktif</span>
+                    <span className="text-lg font-black text-emerald-800">{logForm.total_active_team}</span>
+                  </div>
+                  <div className="bg-rose-50 p-2 rounded-lg border border-rose-200 text-center">
+                    <span className="text-[11px] font-bold text-rose-700 block">Tim Cuti</span>
+                    <span className="text-lg font-black text-rose-800">{logForm.total_on_leave}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Topik Deliverable Project / Materi LMS</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Contoh: Produksi Video Kampanye & Modul Copywriting"
+                    value={logForm.project_deliverable_topic}
+                    onChange={(e) => setLogForm({ ...logForm, project_deliverable_topic: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Rincian Eksekusi & Aktivitas Belajar</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Brainstorming script, shooting studio, review hasil"
+                    value={logForm.execution_details}
+                    onChange={(e) => setLogForm({ ...logForm, execution_details: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Catatan Blocker / Evaluasi HR & Lead</label>
+                  <input
+                    type="text"
+                    placeholder="Kendala teknis / Kebutuhan peralatan tambahan"
+                    value={logForm.blocker_evaluator_notes}
+                    onChange={(e) => setLogForm({ ...logForm, blocker_evaluator_notes: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-300 text-sm font-semibold hover:bg-slate-100"
+                >
+                  <Printer className="w-4 h-4" /> Cetak Jurnal Bulanan
+                </button>
+                <button type="submit" className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-[#1E40AF] text-white text-sm font-semibold">
+                  <Save className="w-4 h-4" /> Simpan Jurnal ke Supabase
+                </button>
+              </div>
+            </form>
+
+            {/* Daftar Jurnal Siap Cetak */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm print-area space-y-4">
+              <div className="border-b pb-3 flex justify-between items-center">
+                <div>
+                  <h4 className="font-bold text-lg">Rekapitulasi Jurnal Operasional, Sprint & LMS — {settings.company_name}</h4>
+                  <p className="text-xs text-slate-500">Periode: {settings.period_term} ({settings.period_year})</p>
+                </div>
+              </div>
+              <table className="w-full text-sm text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-100 text-xs uppercase">
+                    <th className="p-2.5 border">Tanggal & Sesi</th>
+                    <th className="p-2.5 border">Kompetensi / KPI</th>
+                    <th className="p-2.5 border">Topik Project / Materi LMS</th>
+                    <th className="p-2.5 border">Eksekusi & Blocker</th>
+                    <th className="p-2.5 border text-center">Hadir / Cuti</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activityLogs.map((log) => (
+                    <tr key={log.id}>
+                      <td className="p-2.5 border text-xs">
+                        <div className="font-bold">{log.log_date}</div>
+                        <div>{log.sprint_session_info}</div>
+                      </td>
+                      <td className="p-2.5 border font-semibold">{log.competencies?.competency_name}</td>
+                      <td className="p-2.5 border">{log.project_deliverable_topic}</td>
+                      <td className="p-2.5 border text-xs">
+                        <div>{log.execution_details}</div>
+                        {log.blocker_evaluator_notes && <div className="text-rose-600 mt-1">Blocker: {log.blocker_evaluator_notes}</div>}
+                      </td>
+                      <td className="p-2.5 border text-center font-bold">
+                        {log.total_active_team} Aktif / {log.total_on_leave} Cuti
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="grid grid-cols-2 text-center pt-8 text-sm">
+                <div>
+                  <p>Mengetahui, Managing Director</p>
+                  <div className="h-16" />
+                  <p className="font-bold underline">{settings.managing_director_name}</p>
+                </div>
+                <div>
+                  <p>Dicatat Oleh, Human Capital Lead</p>
+                  <div className="h-16" />
+                  <p className="font-bold underline">{settings.hr_lead_name}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================
+            MODUL 5: EVALUASI KPI (INLINE SPREADSHEET), SKILL & WORKLOAD ANALYSIS
+           =================================================================== */}
+        {activeModule === 'kpi_workload' && (
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b pb-4">
+                <div>
+                  <h3 className="font-bold text-lg text-slate-800">
+                    Buku Evaluasi KPI, Current Skill Level & Working Load Analysis (WLA)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Rumus Otomatis: <strong>50% Rata-rata Sprint (M1–M4) + 30% Observasi Skill + 20% Project Delivery</strong>.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <label className="text-xs font-bold uppercase text-slate-500">Pilih Kompetensi / KPI:</label>
+                  <select
+                    value={selectedCompId}
+                    onChange={(e) => setSelectedCompId(e.target.value)}
+                    className="px-4 py-2 border border-blue-300 rounded-xl text-sm font-bold text-[#1E40AF] bg-blue-50"
+                  >
+                    {competencies.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        [{c.category}] {c.competency_name} (Target: {c.target_threshold})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-700 uppercase">
+                      <th className="p-2.5 border">Karyawan & Status</th>
+                      <th className="p-2.5 border text-center">M1</th>
+                      <th className="p-2.5 border text-center">M2</th>
+                      <th className="p-2.5 border text-center">M3</th>
+                      <th className="p-2.5 border text-center">M4</th>
+                      <th className="p-2.5 border text-center">Skill Rev (30%)</th>
+                      <th className="p-2.5 border text-center">Project (20%)</th>
+                      <th className="p-2.5 border text-center">Skor Akhir</th>
+                      <th className="p-2.5 border text-center">Skill (1-5)</th>
+                      <th className="p-2.5 border text-center">Workload (%)</th>
+                      <th className="p-2.5 border">Deskripsi Capaian & Beban Kerja</th>
+                      <th className="p-2.5 border text-center">Simpan</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {employees.map((emp) => {
+                      const row = inlineKpiMap[emp.id];
+                      if (!row) return null;
+                      const finalScore = calculateRowScore(row);
+                      const activeComp = competencies.find((c) => c.id === selectedCompId);
+                      const target = activeComp?.target_threshold || 75;
+                      const isPass = finalScore >= target;
+
+                      return (
+                        <tr key={emp.id} className="hover:bg-slate-50">
+                          <td className="p-2.5 border">
+                            <div className="font-bold text-slate-900">{emp.full_name}</div>
+                            <div className="text-[11px] text-slate-500">{emp.employment_status}</div>
+                          </td>
+                          {(['kpi_q1', 'kpi_q2', 'kpi_q3', 'kpi_q4', 'mid_review_score', 'final_project_score'] as const).map((field) => (
+                            <td key={field} className="p-1.5 border text-center">
+                              <input
+                                type="number"
+                                min={0}
+                                max={100}
+                                value={row[field]}
+                                onChange={(e) =>
+                                  setInlineKpiMap((prev) => ({
+                                    ...prev,
+                                    [emp.id]: { ...row, [field]: Number(e.target.value) },
+                                  }))
+                                }
+                                className="w-14 px-1.5 py-1 text-center border rounded font-semibold"
+                              />
+                            </td>
+                          ))}
+                          <td className="p-2.5 border text-center">
+                            <span
+                              className={`px-2.5 py-1 rounded-full font-black text-xs ${
+                                isPass ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                              }`}
+                            >
+                              {finalScore}
+                            </span>
+                          </td>
+                          <td className="p-1.5 border text-center">
+                            <select
+                              value={row.current_skill_level}
+                              onChange={(e) =>
+                                setInlineKpiMap((prev) => ({
+                                  ...prev,
+                                  [emp.id]: { ...row, current_skill_level: Number(e.target.value) },
+                                }))
+                              }
+                              className="px-2 py-1 border rounded font-bold text-[#1E40AF]"
+                            >
+                              {[1, 2, 3, 4, 5].map((lvl) => (
+                                <option key={lvl} value={lvl}>
+                                  Lv.{lvl}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="p-1.5 border text-center">
+                            <input
+                              type="number"
+                              min={0}
+                              max={200}
+                              value={row.workload_percentage}
+                              onChange={(e) =>
+                                setInlineKpiMap((prev) => ({
+                                  ...prev,
+                                  [emp.id]: { ...row, workload_percentage: Number(e.target.value) },
+                                }))
+                              }
+                              className={`w-16 px-1.5 py-1 text-center border rounded font-bold ${
+                                row.workload_percentage > 100
+                                  ? 'bg-rose-50 text-rose-700 border-rose-300'
+                                  : row.workload_percentage >= 80
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                                  : 'bg-amber-50 text-amber-700 border-amber-300'
+                              }`}
+                            />
+                          </td>
+                          <td className="p-2 border">
+                            <div className="flex gap-1.5 items-center">
+                              <input
+                                type="text"
+                                value={row.performance_narrative || ''}
+                                onChange={(e) =>
+                                  setInlineKpiMap((prev) => ({
+                                    ...prev,
+                                    [emp.id]: { ...row, performance_narrative: e.target.value },
+                                  }))
+                                }
+                                placeholder="Klik ikon bintang untuk auto-generate..."
+                                className="w-full px-2 py-1 border rounded text-xs"
+                              />
+                              <button
+                                type="button"
+                                title="Generate Deskripsi Kompetensi & Workload Otomatis"
+                                onClick={() => generateAutoNarrative(emp, row)}
+                                className="p-1.5 rounded bg-blue-50 text-[#1E40AF] hover:bg-blue-100 shrink-0"
+                              >
+                                <Sparkles className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="p-2 border text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleSaveSingleKpiRow(emp.id)}
+                              className="px-3 py-1.5 rounded-lg bg-[#10B981] text-white font-bold hover:bg-emerald-600"
+                            >
+                              Simpan
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================
+            MODUL 6: GENERATOR RAPOR KARYAWAN SIAP CETAK (A4), IDP, LMS & TALENT PIPELINE
+           =================================================================== */}
+        {activeModule === 'report_card' && (
+          <div className="space-y-6">
+            {/* PANEL KONFIGURASI RAPOR, IDP & KEPUTUSAN KARIR (NO-PRINT) */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5 no-print">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b pb-4">
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-bold text-slate-700">Pilih Karyawan:</label>
+                  <select
+                    value={selectedReportEmpId}
+                    onChange={(e) => setSelectedReportEmpId(e.target.value)}
+                    className="px-4 py-2 border border-blue-300 rounded-xl text-sm font-bold text-[#1E40AF] bg-blue-50"
+                  >
+                    {employees.map((emp) => (
+                      <option key={emp.id} value={emp.id}>
+                        {emp.full_name} — ({emp.employment_status})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => {
+                      if (!selectedReportEmpId) return;
+                      setIsLoading(true);
+                      try {
+                        await SkenaHrApi.upsertEmployeeReport({
+                          ...empReportData,
+                          employee_id: selectedReportEmpId,
+                          period_year: settings.period_year,
+                          period_term: settings.period_term,
+                        });
+                        triggerToast('Data Rapor, IDP & Talent Pipeline tersimpan di Supabase!');
+                      } catch (err: any) {
+                        triggerToast(err.message, 'error');
+                      } finally {
+                        setIsLoading(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#10B981] text-white text-sm font-semibold hover:bg-emerald-600 shadow"
+                  >
+                    <Save className="w-4 h-4" /> Simpan Keputusan Rapor ke Supabase
+                  </button>
+                  <button
+                    onClick={() => window.print()}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#1E40AF] text-white text-sm font-semibold hover:bg-blue-800 shadow"
+                  >
+                    <Printer className="w-4 h-4" /> Cetak Rapor A4 / Simpan PDF
+                  </button>
+                </div>
+              </div>
+
+              {/* Form Pelengkap IDP, LMS & Talent Pipeline */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Pemetaan 9-Box Talent Pipeline</label>
+                  <select
+                    value={empReportData.talent_pipeline_box}
+                    onChange={(e) => setEmpReportData({ ...empReportData, talent_pipeline_box: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm font-semibold"
+                  >
+                    <option value="High Potential - High Performer (Star)">High Potential - High Performer (Star)</option>
+                    <option value="Core Player (Future Star)">Core Player (Future Star)</option>
+                    <option value="Solid Professional (Key Contributor)">Solid Professional (Key Contributor)</option>
+                    <option value="Inconsistent Player (Needs Coaching)">Inconsistent Player (Needs Coaching)</option>
+                    <option value="Underperformer (Performance Improvement Plan)">Underperformer (Performance Improvement Plan)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Keputusan Karir & Kontrak</label>
+                  <select
+                    value={empReportData.career_decision}
+                    onChange={(e) => setEmpReportData({ ...empReportData, career_decision: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm font-semibold text-[#1E40AF]"
+                  >
+                    <option value="Pass Probation to Full Time">Lulus Probation ke Full Time</option>
+                    <option value="Promote / Grade Up">Promosi Jabatan / Grade Up</option>
+                    <option value="Extend Performance Contract">Perpanjang Kontrak Performance / Freelance</option>
+                    <option value="Retain Current Role">Pertahankan di Posisi Saat Ini</option>
+                    <option value="Performance Improvement Plan (PIP)">Program Pembinaan (PIP)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Penugasan Jabatan / Proyek Berikutnya</label>
+                  <input
+                    type="text"
+                    value={empReportData.next_role_assignment}
+                    onChange={(e) => setEmpReportData({ ...empReportData, next_role_assignment: e.target.value })}
+                    placeholder="Contoh: Senior Creative Lead"
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+              </div>
+
+              {/* Editor Modul IDP & LMS */}
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold uppercase text-slate-600">
+                    Individual Development Plan (IDP) & Learning Management System (LMS)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEmpReportData({
+                        ...empReportData,
+                        idp_lms_modules: [
+                          ...empReportData.idp_lms_modules,
+                          { module_name: '', category: 'LMS Course', target_date: todayStr, status: 'In Progress', score: '-' },
+                        ],
+                      })
+                    }
+                    className="text-xs font-semibold text-[#1E40AF] hover:underline"
+                  >
+                    + Tambah Modul IDP / LMS
+                  </button>
+                </div>
+                {empReportData.idp_lms_modules.map((mod, idx) => (
+                  <div key={idx} className="grid grid-cols-1 md:grid-cols-5 gap-2 bg-slate-50 p-2.5 rounded-lg border">
+                    <input
+                      type="text"
+                      placeholder="Nama Modul LMS / Rencana Pengembangan"
+                      value={mod.module_name}
+                      onChange={(e) => {
+                        const copy = [...empReportData.idp_lms_modules];
+                        copy[idx].module_name = e.target.value;
+                        setEmpReportData({ ...empReportData, idp_lms_modules: copy });
+                      }}
+                      className="px-2.5 py-1.5 border rounded text-xs md:col-span-2 bg-white"
+                    />
+                    <select
+                      value={mod.category}
+                      onChange={(e) => {
+                        const copy = [...empReportData.idp_lms_modules];
+                        copy[idx].category = e.target.value as any;
+                        setEmpReportData({ ...empReportData, idp_lms_modules: copy });
+                      }}
+                      className="px-2.5 py-1.5 border rounded text-xs bg-white"
+                    >
+                      <option value="LMS Course">LMS Course</option>
+                      <option value="Mentoring">1-on-1 Mentoring</option>
+                      <option value="Project Assignment">Stretch Project</option>
+                    </select>
+                    <select
+                      value={mod.status}
+                      onChange={(e) => {
+                        const copy = [...empReportData.idp_lms_modules];
+                        copy[idx].status = e.target.value as any;
+                        setEmpReportData({ ...empReportData, idp_lms_modules: copy });
+                      }}
+                      className="px-2.5 py-1.5 border rounded text-xs bg-white"
+                    >
+                      <option value="Completed">Completed</option>
+                      <option value="In Progress">In Progress</option>
+                      <option value="Planned">Planned</option>
+                    </select>
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        placeholder="Skor / Hasil"
+                        value={mod.score}
+                        onChange={(e) => {
+                          const copy = [...empReportData.idp_lms_modules];
+                          copy[idx].score = e.target.value;
+                          setEmpReportData({ ...empReportData, idp_lms_modules: copy });
+                        }}
+                        className="w-full px-2 py-1.5 border rounded text-xs bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const copy = empReportData.idp_lms_modules.filter((_, i) => i !== idx);
+                          setEmpReportData({ ...empReportData, idp_lms_modules: copy });
+                        }}
+                        className="text-rose-500 px-1.5"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Catatan Budaya Kerja & Perilaku (HR Evaluation)</label>
+                  <textarea
+                    rows={2}
+                    value={empReportData.behavioral_culture_notes}
+                    onChange={(e) => setEmpReportData({ ...empReportData, behavioral_culture_notes: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-600">Catatan Strategis Managing Director & Atasan</label>
+                  <textarea
+                    rows={2}
+                    value={empReportData.hr_director_notes}
+                    onChange={(e) => setEmpReportData({ ...empReportData, hr_director_notes: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 border rounded-lg text-xs"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* =================================================================
+                LEMBAR PRATINJAU RAPOR RESMI STANDAR A4 SIAP CETAK
+               ================================================================= */}
+            {(() => {
+              const emp = employees.find((e) => e.id === selectedReportEmpId);
+              if (!emp) return null;
+              const empKpis = kpiList.filter((k) => k.employee_id === emp.id);
+              const wfoCount = empReportAttendances.filter((a) => a.status === 'WFO').length;
+              const wfhCount = empReportAttendances.filter((a) => a.status === 'WFH').length;
+              const contentCount = empReportAttendances.filter((a) => a.status === 'Take Content').length;
+              const cutiCount = empReportAttendances.filter((a) => a.status === 'Cuti').length;
+
+              return (
+                <div className="bg-white mx-auto max-w-[210mm] p-8 md:p-10 rounded-2xl border border-slate-300 shadow-lg print-area space-y-6 text-slate-900">
+                  {/* KOP DOKUMEN PERUSAHAAN */}
+                  <div className="border-b-4 border-double border-slate-900 pb-4 flex items-center justify-between">
+                    <div>
+                      <h1 className="text-2xl font-black uppercase tracking-tight text-[#1E40AF]">{settings.company_name}</h1>
+                      <p className="text-xs font-semibold text-slate-600">
+                        {settings.industry_sector} • Reg: {settings.business_registration_no}
+                      </p>
+                      <p className="text-xs text-slate-500">Dokumen Evaluasi Kinerja, Beban Kerja (WLA), IDP & Talent Pipeline</p>
+                    </div>
+                    <div className="text-right">
+                      <span className="inline-block px-3 py-1 rounded bg-slate-900 text-white text-xs font-bold uppercase">
+                        CONFIDENTIAL HR REPORT
+                      </span>
+                      <p className="text-xs text-slate-600 mt-1">
+                        Periode: {settings.period_term} ({settings.period_year})
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* IDENTITAS KARYAWAN & SKEMA KONTRAK */}
+                  <div className="grid grid-cols-2 gap-4 text-xs bg-slate-50 p-4 rounded-xl border border-slate-200">
+                    <div className="space-y-1">
+                      <div>
+                        <span className="text-slate-500 w-32 inline-block">Nama Karyawan:</span>
+                        <strong className="text-sm">{emp.full_name}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 w-32 inline-block">NIK / ID:</span>
+                        <span className="font-mono">{emp.employee_nik}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 w-32 inline-block">Jabatan & Divisi:</span>
+                        <span className="font-semibold">
+                          {emp.role_title} ({emp.department})
+                        </span>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div>
+                        <span className="text-slate-500 w-36 inline-block">Status Kontrak:</span>
+                        <strong className="text-[#1E40AF] uppercase">{emp.employment_status}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 w-36 inline-block">Durasi & Lokasi:</span>
+                        <span>
+                          {emp.contract_duration} • {emp.work_location}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 w-36 inline-block">Benefit / Project:</span>
+                        <span>
+                          {emp.employment_status === 'Full Time'
+                            ? emp.benefits_package
+                            : emp.assigned_project || emp.benefits_package || '-'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* TABEL 1: CAPAIAN KPI, SKILL LEVEL & WORKLOAD ANALYSIS */}
+                  <div>
+                    <h2 className="text-xs font-black uppercase tracking-wider text-slate-700 mb-2">
+                      A. Evaluasi Key Performance Indicator (KPI), Kompetensi & Working Load Analysis
+                    </h2>
+                    <table className="w-full text-xs border-collapse border border-slate-300">
+                      <thead>
+                        <tr className="bg-slate-100">
+                          <th className="p-2 border border-slate-300 text-left">Kode & Kompetensi / KPI</th>
+                          <th className="p-2 border border-slate-300 text-center">Kategori</th>
+                          <th className="p-2 border border-slate-300 text-center">Target</th>
+                          <th className="p-2 border border-slate-300 text-center">Skor Akhir</th>
+                          <th className="p-2 border border-slate-300 text-center">Skill (1-5)</th>
+                          <th className="p-2 border border-slate-300 text-center">Workload</th>
+                          <th className="p-2 border border-slate-300 text-left">Analisis Capaian & Beban Kerja</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {competencies.map((comp) => {
+                          const ev = empKpis.find((k) => k.competency_id === comp.id);
+                          const score = ev ? ev.final_kpi_score ?? calculateRowScore(ev) : 0;
+                          return (
+                            <tr key={comp.id}>
+                              <td className="p-2 border border-slate-300 font-semibold">
+                                {comp.competency_code} - {comp.competency_name}
+                              </td>
+                              <td className="p-2 border border-slate-300 text-center">{comp.category}</td>
+                              <td className="p-2 border border-slate-300 text-center">{comp.target_threshold}</td>
+                              <td className="p-2 border border-slate-300 text-center font-bold">{ev ? score : '-'}</td>
+                              <td className="p-2 border border-slate-300 text-center">{ev ? `Lv.${ev.current_skill_level}` : '-'}</td>
+                              <td className="p-2 border border-slate-300 text-center font-semibold">
+                                {ev ? `${ev.workload_percentage}%` : '-'}
+                              </td>
+                              <td className="p-2 border border-slate-300 text-[11px] leading-relaxed">
+                                {ev?.performance_narrative || 'Belum ada catatan evaluasi pada kompetensi ini.'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* TABEL 2: INDIVIDUAL DEVELOPMENT PLAN (IDP) & LMS */}
+                  <div>
+                    <h2 className="text-xs font-black uppercase tracking-wider text-slate-700 mb-2">
+                      B. Individual Development Plan (IDP) & Learning Management System (LMS)
+                    </h2>
+                    <table className="w-full text-xs border-collapse border border-slate-300">
+                      <thead>
+                        <tr className="bg-slate-100">
+                          <th className="p-2 border border-slate-300 text-left">Modul Pembelajaran / Program Pengembangan</th>
+                          <th className="p-2 border border-slate-300 text-center">Metode</th>
+                          <th className="p-2 border border-slate-300 text-center">Status Penyelesaian</th>
+                          <th className="p-2 border border-slate-300 text-center">Skor / Evaluasi</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {empReportData.idp_lms_modules.map((m, i) => (
+                          <tr key={i}>
+                            <td className="p-2 border border-slate-300 font-medium">{m.module_name}</td>
+                            <td className="p-2 border border-slate-300 text-center">{m.category}</td>
+                            <td className="p-2 border border-slate-300 text-center font-semibold">{m.status}</td>
+                            <td className="p-2 border border-slate-300 text-center">{m.score}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* TABEL 3: AKUMULASI PRESENSI & KEPUTUSAN TALENT PIPELINE */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <h2 className="text-xs font-black uppercase tracking-wider text-slate-700 mb-2">
+                        C. Rekapitulasi Presensi & Aktivitas Lapangan
+                      </h2>
+                      <table className="w-full text-xs border-collapse border border-slate-300">
+                        <tbody>
+                          <tr>
+                            <td className="p-2 border border-slate-300">Hadir Work From Office (WFO)</td>
+                            <td className="p-2 border border-slate-300 font-bold text-right">{wfoCount} Hari</td>
+                          </tr>
+                          <tr>
+                            <td className="p-2 border border-slate-300">Hadir Work From Home (WFH)</td>
+                            <td className="p-2 border border-slate-300 font-bold text-right">{wfhCount} Hari</td>
+                          </tr>
+                          <tr>
+                            <td className="p-2 border border-slate-300">Produksi Lapangan (Take Content)</td>
+                            <td className="p-2 border border-slate-300 font-bold text-right">{contentCount} Hari</td>
+                          </tr>
+                          <tr>
+                            <td className="p-2 border border-slate-300">Cuti / Izin Resmi</td>
+                            <td className="p-2 border border-slate-300 font-bold text-right">{cutiCount} Hari</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl border-2 border-slate-800 bg-slate-50 space-y-1.5 text-xs">
+                      <div className="font-black uppercase text-slate-700">D. Keputusan Talent Pipeline & Status Karir</div>
+                      <div>
+                        <span className="text-slate-500">Kategori Talent Box:</span>{' '}
+                        <strong className="text-[#1E40AF]">{empReportData.talent_pipeline_box}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Keputusan Manajemen:</span>{' '}
+                        <strong className="text-emerald-700 uppercase">{empReportData.career_decision}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Penugasan / Role Baru:</span>{' '}
+                        <strong>{empReportData.next_role_assignment || '-'}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* CATATAN EVALUASI */}
+                  <div className="grid grid-cols-2 gap-4 text-xs">
+                    <div className="p-3 border border-slate-300 rounded-lg">
+                      <strong className="block mb-1 uppercase text-slate-600">Catatan Budaya Kerja & HR:</strong>
+                      <p className="leading-relaxed">{empReportData.behavioral_culture_notes}</p>
+                    </div>
+                    <div className="p-3 border border-slate-300 rounded-lg">
+                      <strong className="block mb-1 uppercase text-slate-600">Catatan Managing Director / Atasan:</strong>
+                      <p className="leading-relaxed">{empReportData.hr_director_notes}</p>
+                    </div>
+                  </div>
+
+                  {/* KOLOM TANDA TANGAN RESMI */}
+                  <div className="grid grid-cols-3 text-center text-xs pt-6">
+                    <div>
+                      <p>Karyawan Yang Dinilai,</p>
+                      <div className="h-16" />
+                      <p className="font-bold underline">{emp.full_name}</p>
+                      <p className="text-slate-500">NIK: {emp.employee_nik}</p>
+                    </div>
+                    <div>
+                      <p>Human Capital / HR Lead,</p>
+                      <div className="h-16" />
+                      <p className="font-bold underline">{settings.hr_lead_name}</p>
+                      <p className="text-slate-500">ID: {settings.hr_lead_id}</p>
+                    </div>
+                    <div>
+                      <p>Menyetujui, Managing Director</p>
+                      <div className="h-16" />
+                      <p className="font-bold underline">{settings.managing_director_name}</p>
+                      <p className="text-slate-500">ID: {settings.managing_director_id}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}

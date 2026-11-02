@@ -1,0 +1,8 @@
+{
+  "name": "Remix PT Skena Wahana Kreatif HRIS - Creative Agency People \u0026 Performance Cloud",
+  "description": "Sistem Informasi Manajemen SDM, Presensi Dinamis (WFO/WFH/Content/Cuti), Jurnal Sprint \u0026 LMS, Evaluasi KPI \u0026 Workload Analysis (WLA), serta Generator Rapor Kinerja Karyawan A4 untuk PT Skena Wahana Kreatif.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
