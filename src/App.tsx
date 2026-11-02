@@ -2974,56 +2974,62 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = subscribeRealtimeUpdates(async (evt) => {
       const tableName = typeof evt === 'string' ? evt : evt.table;
+      const isAll = tableName === 'all' || tableName === 'all_tables';
       setRealtimeInfo(getRealtimeStatus());
       // Refresh specific slices silently without blocking UI inputs
       try {
-        if (tableName === 'company_settings' || tableName === 'all') {
+        if (tableName === 'company_settings' || isAll) {
           const s = await SkenaHrApi.getSettings();
           if (s) setSettings(s);
           setKpiWeights(SkenaHrApi.getKpiWeights());
         }
-        if (tableName === 'employees' || tableName === 'all') {
+        if (tableName === 'employees' || isAll) {
           setEmployees(await SkenaHrApi.getEmployees());
         }
-        if (tableName === 'competencies' || tableName === 'all') {
+        if (tableName === 'competencies' || isAll) {
           setCompetencies(await SkenaHrApi.getCompetencies());
         }
-        if (tableName === 'work_schedules' || tableName === 'all') {
+        if (tableName === 'work_schedules' || isAll) {
           setSchedules(await SkenaHrApi.getSchedules());
         }
-        if (tableName === 'activity_logs' || tableName === 'all') {
+        if (tableName === 'activity_logs' || isAll) {
           setActivityLogs(await SkenaHrApi.getActivityLogs());
         }
-        if (tableName === 'kpi_evaluations' || tableName === 'all') {
+        if (tableName === 'kpi_evaluations' || isAll) {
           setKpiList(await SkenaHrApi.getKpiEvaluations(settings.period_year, settings.period_term));
+          setKpiWeights(SkenaHrApi.getKpiWeights());
         }
-        if (tableName === 'user_accounts' || tableName === 'all') {
+        if (tableName === 'user_accounts' || isAll) {
           setUserAccounts(await SkenaHrApi.fetchUsersFromSupabase());
         }
-        if (tableName === 'job_profiles' || tableName === 'all') {
+        if (tableName === 'job_profiles' || isAll) {
           setJobProfiles(await SkenaHrApi.getJobProfiles());
         }
-        if (tableName === 'lms_curriculum' || tableName === 'all') {
+        if (tableName === 'lms_curriculum' || isAll) {
           setLmsCurriculumList(await SkenaHrApi.getLmsCurriculum());
         }
-        if (tableName === 'sharing_sessions' || tableName === 'all') {
+        if (tableName === 'sharing_sessions' || isAll) {
           setSharingSessions(await SkenaHrApi.getSharingSessions());
         }
-        if (tableName === 'one_year_plans' || tableName === 'all') {
+        if (tableName === 'one_year_plans' || isAll) {
           setOneYearPlans(await SkenaHrApi.getOneYearPlans());
         }
-        if (tableName === 'executive_reminders' || tableName === 'all') {
+        if (tableName === 'executive_reminders' || isAll) {
           setExecutiveReminders(await SkenaHrApi.getExecutiveReminders());
         }
-        if (tableName === 'employee_reports' || tableName === 'all') {
+        if (tableName === 'employee_reports' || isAll) {
           setAllReportsMap(await SkenaHrApi.getAllEmployeeReports(settings.period_year, settings.period_term));
+        }
+        if (tableName === 'attendances' || isAll) {
+          await fetchDailyAttendance(selectedDate);
+          await fetchMonthlyAttendance(attendanceMonth);
         }
       } catch {
         // Ignore silent background sync errors
       }
     });
     return () => unsubscribe();
-  }, [settings.period_year, settings.period_term]);
+  }, [settings.period_year, settings.period_term, selectedDate, attendanceMonth]);
 
   // Sync effective employee when currentUser changes
   useEffect(() => {
@@ -3451,24 +3457,34 @@ export default function App() {
   };
 
   // Module 3: Batch Presensi (Admin Only)
-  const handleSetAllWfo = () => {
+  const handleSetAllWfo = async () => {
     if (currentUser?.role !== 'admin') {
       triggerToast('Akses ditolak: Hanya Admin yang dapat melakukan Set Semua WFO.', 'error');
       return;
     }
-    const updated: Record<string, AttendanceRecord> = {};
-    employees.forEach((emp) => {
-      updated[emp.id] = {
-        employee_id: emp.id,
-        attendance_date: selectedDate,
-        check_in_time: dailyAttendances[emp.id]?.check_in_time || '08:50:00',
-        status: 'WFO',
-        work_location_tag: emp.work_location || 'Makassar HQ',
-        notes: `Hadir Tepat Waktu ≤ 09:00 WITA (WFO Makassar HQ)`,
-      };
-    });
-    setDailyAttendances(updated);
-    triggerToast('Seluruh karyawan diset WFO Tepat Waktu (≤ 09:00 WITA). Klik "Simpan Presensi Serentak" untuk konfirmasi.');
+    setIsLoading(true);
+    try {
+      const updated: Record<string, AttendanceRecord> = {};
+      employees.forEach((emp) => {
+        updated[emp.id] = {
+          employee_id: emp.id,
+          attendance_date: selectedDate,
+          check_in_time: dailyAttendances[emp.id]?.check_in_time || '08:50:00',
+          status: 'WFO',
+          work_location_tag: emp.work_location || 'Makassar HQ',
+          notes: `Hadir Tepat Waktu ≤ 09:00 WITA (WFO Makassar HQ)`,
+        };
+      });
+      setDailyAttendances(updated);
+      await SkenaHrApi.batchUpsertAttendances(Object.values(updated));
+      await fetchDailyAttendance(selectedDate);
+      await fetchMonthlyAttendance(attendanceMonth);
+      triggerToast(`Seluruh karyawan (${employees.length} orang) diset WFO Tepat Waktu (≤ 09:00 WITA) & langsung tersimpan!`);
+    } catch (err: any) {
+      triggerToast(`Gagal mengatur WFO serentak: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleBatchSaveAttendance = async () => {
@@ -3483,6 +3499,7 @@ export default function App() {
         check_in_time: r.check_in_time || '08:45:00',
       }));
       await SkenaHrApi.batchUpsertAttendances(records);
+      await fetchDailyAttendance(selectedDate);
       await fetchMonthlyAttendance(attendanceMonth);
       triggerToast(`Presensi tanggal ${selectedDate} (${records.length} karyawan beserta jam & kalkulasi keterlambatan) berhasil disimpan!`);
     } catch (err: any) {
@@ -8516,7 +8533,7 @@ export default function App() {
                                         ...prev,
                                         [emp.id]: updatedRec,
                                       }));
-                                      SkenaHrApi.submitEmployeeAttendance(updatedRec);
+                                      SkenaHrApi.submitEmployeeAttendance(updatedRec).then(() => fetchMonthlyAttendance(attendanceMonth));
                                     }}
                                     placeholder="Makassar HQ / Lokasi WFH / Studio"
                                     className="w-full px-2.5 py-1.5 border rounded-lg text-xs bg-white"
@@ -8536,7 +8553,7 @@ export default function App() {
                                         ...prev,
                                         [emp.id]: updatedRec,
                                       }));
-                                      SkenaHrApi.submitEmployeeAttendance(updatedRec);
+                                      SkenaHrApi.submitEmployeeAttendance(updatedRec).then(() => fetchMonthlyAttendance(attendanceMonth));
                                     }}
                                     placeholder="Keterangan izin / alasan WFH / urusan kantor / overtime"
                                     className="w-full px-2.5 py-1.5 border rounded-lg text-xs bg-white"
@@ -9868,27 +9885,111 @@ export default function App() {
                       {monthlyAttendances.map((rec, idx) => {
                         const emp = employees.find((e) => e.id === rec.employee_id);
                         const p = analyzeAttendancePunctuality(rec.check_in_time, rec.status);
+                        const isAdmin = currentUser.role === 'admin';
                         return (
                           <tr key={`${rec.employee_id}-${rec.attendance_date}-${idx}`} className="hover:bg-slate-50">
                             <td className="p-2.5 border font-mono font-bold text-slate-900">{rec.attendance_date}</td>
-                            <td className="p-2.5 border font-mono font-bold text-emerald-700">{rec.check_in_time || '08:45:00'}</td>
+                            <td className="p-2.5 border font-mono font-bold text-emerald-700">
+                              {isAdmin ? (
+                                <input
+                                  type="time"
+                                  step="1"
+                                  value={rec.check_in_time || '08:45:00'}
+                                  onChange={async (e) => {
+                                    await SkenaHrApi.submitEmployeeAttendance({
+                                      ...rec,
+                                      check_in_time: e.target.value,
+                                    });
+                                    await fetchMonthlyAttendance(attendanceMonth);
+                                    await fetchDailyAttendance(selectedDate);
+                                  }}
+                                  className="px-2 py-1 border rounded-lg font-mono text-xs font-bold bg-white text-slate-900"
+                                />
+                              ) : (
+                                rec.check_in_time || '08:45:00'
+                              )}
+                            </td>
                             <td className="p-2.5 border">
                               <div className="font-bold text-slate-900">{emp?.full_name || 'Karyawan'}</div>
                               <div className="text-[11px] text-slate-500">{emp?.employee_nik || '-'} · {emp?.department || '-'}</div>
                             </td>
                             <td className="p-2.5 border">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${getAttendanceStatusBadgeClass(rec.status)}`}>
-                                {rec.status}
-                              </span>
+                              {isAdmin ? (
+                                <select
+                                  value={rec.status}
+                                  onChange={async (e) => {
+                                    await SkenaHrApi.submitEmployeeAttendance({
+                                      ...rec,
+                                      status: e.target.value as AttendanceStatus,
+                                    });
+                                    await fetchMonthlyAttendance(attendanceMonth);
+                                    await fetchDailyAttendance(selectedDate);
+                                  }}
+                                  className="px-2 py-1 border rounded-lg text-xs font-bold bg-white text-[#1E40AF]"
+                                >
+                                  <option value="WFO">WFO</option>
+                                  <option value="WFH">WFH / WFA</option>
+                                  <option value="Take Content">Take Content</option>
+                                  <option value="Urusan Kantor">Urusan Kantor</option>
+                                  <option value="Overtime">Overtime</option>
+                                  <option value="Izin">Izin Resmi</option>
+                                  <option value="Urusan Pribadi">Urusan Pribadi</option>
+                                  <option value="Sakit">Sakit</option>
+                                  <option value="Cuti">Cuti</option>
+                                  <option value="Tidak Absen">Tidak Absen</option>
+                                </select>
+                              ) : (
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${getAttendanceStatusBadgeClass(rec.status)}`}>
+                                  {rec.status}
+                                </span>
+                              )}
                             </td>
                             <td className="p-2.5 border">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.badgeClass}`}>
                                 {p.badgeLabel}
                               </span>
                             </td>
-                            <td className="p-2.5 border text-slate-700">{rec.work_location_tag || 'Makassar HQ'}</td>
-                            <td className="p-2.5 border text-slate-600">{rec.notes || '-'}</td>
-                            {currentUser.role === 'admin' && (
+                            <td className="p-2.5 border text-slate-700">
+                              {isAdmin ? (
+                                <input
+                                  type="text"
+                                  value={rec.work_location_tag || ''}
+                                  onChange={async (e) => {
+                                    await SkenaHrApi.submitEmployeeAttendance({
+                                      ...rec,
+                                      work_location_tag: e.target.value,
+                                    });
+                                    await fetchMonthlyAttendance(attendanceMonth);
+                                    await fetchDailyAttendance(selectedDate);
+                                  }}
+                                  placeholder="Makassar HQ"
+                                  className="w-full px-2 py-1 border rounded-lg text-xs bg-white"
+                                />
+                              ) : (
+                                rec.work_location_tag || 'Makassar HQ'
+                              )}
+                            </td>
+                            <td className="p-2.5 border text-slate-600">
+                              {isAdmin ? (
+                                <input
+                                  type="text"
+                                  value={rec.notes || ''}
+                                  onChange={async (e) => {
+                                    await SkenaHrApi.submitEmployeeAttendance({
+                                      ...rec,
+                                      notes: e.target.value,
+                                    });
+                                    await fetchMonthlyAttendance(attendanceMonth);
+                                    await fetchDailyAttendance(selectedDate);
+                                  }}
+                                  placeholder="Keterangan izin / WFH / output"
+                                  className="w-full px-2 py-1 border rounded-lg text-xs bg-white"
+                                />
+                              ) : (
+                                rec.notes || '-'
+                              )}
+                            </td>
+                            {isAdmin && (
                               <td className="p-2.5 border text-center">
                                 <div className="inline-flex items-center gap-1">
                                   <button
@@ -9905,7 +10006,7 @@ export default function App() {
                                       });
                                     }}
                                     className="p-1.5 text-[#1E40AF] hover:bg-blue-50 rounded-lg"
-                                    title="Edit Log Presensi Ini"
+                                    title="Edit di Form Atas"
                                   >
                                     <Pencil className="w-3.5 h-3.5" />
                                   </button>
@@ -10831,10 +10932,34 @@ export default function App() {
                       </div>
 
                       <div className="flex items-center gap-3">
-                        <div className="w-36">
-                          <div className="flex justify-between text-[11px] font-bold mb-1">
+                        <div className="w-44">
+                          <div className="flex justify-between items-center text-[11px] font-bold mb-1">
                             <span className="text-slate-500">Progres</span>
-                            <span className="text-[#1E40AF]">{plan.progress_pct}%</span>
+                            {currentUser.role === 'admin' ? (
+                              <div className="inline-flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={100}
+                                  value={plan.progress_pct}
+                                  onChange={async (e) => {
+                                    const nextPct = Math.max(0, Math.min(100, Number(e.target.value)));
+                                    const nextDone = nextPct >= 100;
+                                    await SkenaHrApi.upsertOneYearPlan({
+                                      ...plan,
+                                      progress_pct: nextPct,
+                                      is_completed: nextDone,
+                                      status: nextDone ? 'Completed' : plan.status === 'Completed' ? 'On Track' : plan.status,
+                                    });
+                                    setOneYearPlans(await SkenaHrApi.getOneYearPlans());
+                                  }}
+                                  className="w-12 px-1 py-0.5 border rounded text-center text-[11px] font-bold text-[#1E40AF] bg-white"
+                                />
+                                <span className="text-[#1E40AF]">%</span>
+                              </div>
+                            ) : (
+                              <span className="text-[#1E40AF]">{plan.progress_pct}%</span>
+                            )}
                           </div>
                           <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
                             <div

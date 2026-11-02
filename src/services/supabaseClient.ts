@@ -86,6 +86,18 @@ const setupRealtimeSubscription = (client: SupabaseClient) => {
         (payload) => {
           const table = payload.table || 'database';
           const eventType = payload.eventType || 'UPDATE';
+          const newRec = (payload as any)?.new;
+          if (table === 'employee_reports' && newRec?.employee_id === '__SKENA_CLOUD_STORE__') {
+            if (newRec?.behavioral_culture_notes) {
+              try {
+                applyCloudPayloadToMemory(JSON.parse(newRec.behavioral_culture_notes));
+              } catch {
+                // ignore JSON parse error
+              }
+            }
+            notifyRealtimeListeners('all_tables', eventType);
+            return;
+          }
           notifyRealtimeListeners(table, eventType);
         }
       )
@@ -2303,6 +2315,294 @@ const editedUsersMap = new Map<string, AppUser>();
 const deletedUserIds = new Set<string>();
 
 // ============================================================================
+// CLOUD STATE SYNC ENGINE (SUPABASE JSONB + LOCALSTORAGE MIRROR)
+// Menyimpan & menyinkronkan secara permanen modul Senin Di Skena, Bincang Kenyang,
+// One Year Plan (OYAP), Executive Reminders, Bobot KPI, Presensi & atribut ekstensi.
+// ============================================================================
+const CLOUD_STORE_KEY = 'skena_hris_cloud_mirror_v3';
+const CLOUD_STORE_ROW_ID = 'sys-cloud-store-v1';
+const CLOUD_STORE_EMP_ID = '__SKENA_CLOUD_STORE__';
+const CLOUD_STORE_YEAR = '9999';
+const CLOUD_STORE_TERM = '__MASTER_SYNC_V1__';
+
+let cloudStateLoaded = false;
+
+const applyCloudPayloadToMemory = (payload: any) => {
+  if (!payload || typeof payload !== 'object') return;
+
+  if (Array.isArray(payload.sharingSessions) && payload.sharingSessions.length > 0) {
+    localSharingSessions = payload.sharingSessions;
+  } else if (Array.isArray(payload.sharingSessions) && payload.sharingSessionsInitialized) {
+    localSharingSessions = payload.sharingSessions;
+  }
+
+  if (Array.isArray(payload.oneYearPlans) && payload.oneYearPlans.length > 0) {
+    localOneYearPlans = payload.oneYearPlans;
+  } else if (Array.isArray(payload.oneYearPlans) && payload.oneYearPlansInitialized) {
+    localOneYearPlans = payload.oneYearPlans;
+  }
+
+  if (Array.isArray(payload.executiveReminders) && payload.executiveReminders.length > 0) {
+    localExecutiveReminders = payload.executiveReminders;
+  } else if (Array.isArray(payload.executiveReminders) && payload.executiveRemindersInitialized) {
+    localExecutiveReminders = payload.executiveReminders;
+  }
+
+  if (payload.kpiWeights && typeof payload.kpiWeights === 'object') {
+    localKpiWeights = {
+      sprint_weight_pct: Number(payload.kpiWeights.sprint_weight_pct ?? 50),
+      skill_weight_pct: Number(payload.kpiWeights.skill_weight_pct ?? 30),
+      project_weight_pct: Number(payload.kpiWeights.project_weight_pct ?? 20),
+    };
+  }
+
+  if (Array.isArray(payload.deletedEmployeeIds)) {
+    payload.deletedEmployeeIds.forEach((id: string) => deletedEmployeeIds.add(id));
+  }
+  if (payload.editedEmployees && typeof payload.editedEmployees === 'object') {
+    Object.values(payload.editedEmployees).forEach((emp: any) => {
+      if (emp && emp.id && !deletedEmployeeIds.has(emp.id)) {
+        editedEmployeesMap.set(emp.id, emp as Employee);
+      }
+    });
+  }
+
+  if (Array.isArray(payload.deletedCompetencyIds)) {
+    payload.deletedCompetencyIds.forEach((id: string) => deletedCompetencyIds.add(id));
+  }
+  if (payload.editedCompetencies && typeof payload.editedCompetencies === 'object') {
+    Object.values(payload.editedCompetencies).forEach((comp: any) => {
+      if (comp && comp.id && !deletedCompetencyIds.has(comp.id)) {
+        editedCompetenciesMap.set(comp.id, comp as Competency);
+      }
+    });
+  }
+
+  if (Array.isArray(payload.deletedScheduleIds)) {
+    payload.deletedScheduleIds.forEach((id: string) => deletedScheduleIds.add(id));
+  }
+  if (payload.editedSchedules && typeof payload.editedSchedules === 'object') {
+    Object.values(payload.editedSchedules).forEach((sched: any) => {
+      if (sched && sched.id && !deletedScheduleIds.has(sched.id)) {
+        editedSchedulesMap.set(sched.id, sched as WorkSchedule);
+      }
+    });
+  }
+
+  if (Array.isArray(payload.deletedJobProfileIds)) {
+    payload.deletedJobProfileIds.forEach((id: string) => deletedJobProfileIds.add(id));
+  }
+  if (payload.editedJobProfiles && typeof payload.editedJobProfiles === 'object') {
+    Object.values(payload.editedJobProfiles).forEach((jp: any) => {
+      if (jp && jp.id && !deletedJobProfileIds.has(jp.id)) {
+        editedJobProfilesMap.set(jp.id, jp as JobProfile);
+      }
+    });
+  }
+
+  if (Array.isArray(payload.deletedAttendanceKeys)) {
+    payload.deletedAttendanceKeys.forEach((k: string) => deletedAttendanceKeys.add(k));
+  }
+  if (payload.editedAttendances && typeof payload.editedAttendances === 'object') {
+    Object.entries(payload.editedAttendances).forEach(([k, att]: [string, any]) => {
+      if (att && !deletedAttendanceKeys.has(k)) {
+        editedAttendancesMap.set(k, att as AttendanceRecord);
+      }
+    });
+  }
+
+  // Sinkronkan perubahan presensi ke localAttendances
+  if (deletedAttendanceKeys.size > 0) {
+    localAttendances = localAttendances.filter(
+      (a) => !deletedAttendanceKeys.has(`${a.employee_id}-${a.attendance_date}`)
+    );
+  }
+  editedAttendancesMap.forEach((att) => {
+    const key = `${att.employee_id}-${att.attendance_date}`;
+    if (deletedAttendanceKeys.has(key)) return;
+    const idx = localAttendances.findIndex(
+      (a) => a.employee_id === att.employee_id && a.attendance_date === att.attendance_date
+    );
+    if (idx >= 0) localAttendances[idx] = att;
+    else localAttendances.push(att);
+  });
+
+  if (Array.isArray(payload.deletedKpiKeys)) {
+    payload.deletedKpiKeys.forEach((k: string) => deletedKpiKeys.add(k));
+  }
+  if (payload.editedKpi && typeof payload.editedKpi === 'object') {
+    Object.entries(payload.editedKpi).forEach(([k, kpi]: [string, any]) => {
+      if (kpi && !deletedKpiKeys.has(k)) {
+        editedKpiMap.set(k, kpi as KpiEvaluation);
+        const idx = localKpiList.findIndex(
+          (item) =>
+            item.employee_id === kpi.employee_id &&
+            item.competency_id === kpi.competency_id &&
+            item.period_year === kpi.period_year &&
+            item.period_term === kpi.period_term
+        );
+        if (idx >= 0) localKpiList[idx] = kpi as KpiEvaluation;
+        else localKpiList.push(kpi as KpiEvaluation);
+      }
+    });
+  }
+
+  if (payload.reports && typeof payload.reports === 'object') {
+    Object.entries(payload.reports).forEach(([k, rep]: [string, any]) => {
+      if (rep && rep.employee_id && rep.employee_id !== CLOUD_STORE_EMP_ID) {
+        localReports[k] = rep as EmployeeReport;
+      }
+    });
+  }
+};
+
+const hydrateFromLocalStorage = () => {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(CLOUD_STORE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        applyCloudPayloadToMemory(parsed);
+      }
+    }
+  } catch (e) {
+    console.warn('Local mirror hydration warning:', e);
+  }
+};
+
+// Jalankan hidrasi instan saat modul dimuat
+hydrateFromLocalStorage();
+
+const buildCloudPayloadFromMemory = () => {
+  const editedEmployees: Record<string, Employee> = {};
+  editedEmployeesMap.forEach((v, k) => {
+    editedEmployees[k] = v;
+  });
+
+  const editedCompetencies: Record<string, Competency> = {};
+  editedCompetenciesMap.forEach((v, k) => {
+    editedCompetencies[k] = v;
+  });
+
+  const editedSchedules: Record<string, WorkSchedule> = {};
+  editedSchedulesMap.forEach((v, k) => {
+    editedSchedules[k] = v;
+  });
+
+  const editedJobProfiles: Record<string, JobProfile> = {};
+  editedJobProfilesMap.forEach((v, k) => {
+    editedJobProfiles[k] = v;
+  });
+
+  const editedAttendances: Record<string, AttendanceRecord> = {};
+  editedAttendancesMap.forEach((v, k) => {
+    editedAttendances[k] = v;
+  });
+
+  const editedKpi: Record<string, KpiEvaluation> = {};
+  editedKpiMap.forEach((v, k) => {
+    editedKpi[k] = v;
+  });
+
+  return {
+    updatedAt: new Date().toISOString(),
+    sharingSessionsInitialized: true,
+    sharingSessions: localSharingSessions,
+    oneYearPlansInitialized: true,
+    oneYearPlans: localOneYearPlans,
+    executiveRemindersInitialized: true,
+    executiveReminders: localExecutiveReminders,
+    kpiWeights: localKpiWeights,
+    editedEmployees,
+    deletedEmployeeIds: Array.from(deletedEmployeeIds),
+    editedCompetencies,
+    deletedCompetencyIds: Array.from(deletedCompetencyIds),
+    editedSchedules,
+    deletedScheduleIds: Array.from(deletedScheduleIds),
+    editedJobProfiles,
+    deletedJobProfileIds: Array.from(deletedJobProfileIds),
+    editedAttendances,
+    deletedAttendanceKeys: Array.from(deletedAttendanceKeys),
+    editedKpi,
+    deletedKpiKeys: Array.from(deletedKpiKeys),
+    reports: localReports,
+  };
+};
+
+const saveCloudStateSync = async (): Promise<void> => {
+  const payload = buildCloudPayloadFromMemory();
+  const serialized = JSON.stringify(payload);
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(CLOUD_STORE_KEY, serialized);
+    }
+  } catch (e) {
+    console.warn('LocalStorage write warning:', e);
+  }
+
+  const client = getSupabase();
+  if (!client) return;
+
+  try {
+    await client.from('employee_reports').upsert(
+      {
+        id: CLOUD_STORE_ROW_ID,
+        employee_id: CLOUD_STORE_EMP_ID,
+        period_year: CLOUD_STORE_YEAR,
+        period_term: CLOUD_STORE_TERM,
+        idp_lms_modules: [],
+        behavioral_culture_notes: serialized,
+        hr_director_notes: 'SYSTEM_CLOUD_STATE_SYNC',
+        talent_pipeline_box: 'SYSTEM',
+        career_decision: 'SYSTEM',
+        next_role_assignment: 'SYSTEM',
+        report_date: todayIso,
+      },
+      { onConflict: 'employee_id,period_year,period_term' }
+    );
+  } catch (e: any) {
+    console.warn('Cloud state sync write warning:', e?.message);
+  }
+};
+
+const loadCloudStateSync = async (forceRemote = false): Promise<void> => {
+  if (cloudStateLoaded && !forceRemote) return;
+  hydrateFromLocalStorage();
+
+  const client = getSupabase();
+  if (!client) {
+    cloudStateLoaded = true;
+    return;
+  }
+
+  try {
+    const { data, error } = await client
+      .from('employee_reports')
+      .select('behavioral_culture_notes')
+      .eq('employee_id', CLOUD_STORE_EMP_ID)
+      .eq('period_year', CLOUD_STORE_YEAR)
+      .eq('period_term', CLOUD_STORE_TERM)
+      .maybeSingle();
+
+    if (!error && data?.behavioral_culture_notes) {
+      const remotePayload = JSON.parse(data.behavioral_culture_notes);
+      applyCloudPayloadToMemory(remotePayload);
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.setItem(CLOUD_STORE_KEY, JSON.stringify(buildCloudPayloadFromMemory()));
+        }
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+    cloudStateLoaded = true;
+  } catch (e: any) {
+    console.warn('Cloud state sync read warning:', e?.message);
+    cloudStateLoaded = true;
+  }
+};
+
+// ============================================================================
 // LAYANAN CRUD REAL-TIME KE SUPABASE (DENGAN AUTO-ADAPTIVE FALLBACK & LIVE SYNC)
 // ============================================================================
 
@@ -2315,6 +2615,7 @@ const requireClient = (): SupabaseClient => {
 export const SkenaHrApi = {
   // 1. Company Settings
   async getSettings(): Promise<CompanySettings | null> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (!client) return localSettings;
     try {
@@ -2399,20 +2700,35 @@ export const SkenaHrApi = {
 
   // 2. Employees Master & Collaborator Archive
   async getEmployees(): Promise<Employee[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (client) {
       try {
         const { data, error } = await client.from('employees').select('*').order('full_name', { ascending: true });
+        const mergedMap = new Map<string, Employee>();
+
+        // 1. Masukkan seluruh karyawan default (aktif & arsip) yang tidak dihapus agar data tidak hilang jika di DB baru ada sebagian baris
+        DEFAULT_EMPLOYEES.forEach((seedEmp) => {
+          if (deletedEmployeeIds.has(seedEmp.id) || deletedEmployeeIds.has(seedEmp.employee_nik)) return;
+          mergedMap.set(seedEmp.id, {
+            ...seedEmp,
+            annual_leave_quota: seedEmp.annual_leave_quota ?? 12,
+          });
+        });
+
+        // 2. Timpa / tambahkan dari tabel remote Supabase
         if (!error && data && data.length > 0) {
-          // Merge remote data with seed metadata & any in-session edits so edits never disappear
-          const mergedMap = new Map<string, Employee>();
           data.forEach((row: any) => {
             if (deletedEmployeeIds.has(row.id) || deletedEmployeeIds.has(row.employee_nik)) return;
             const seedMatch = DEFAULT_EMPLOYEES.find(
               (d) => d.id === row.id || d.employee_nik === row.employee_nik
             );
+            const canonicalId = seedMatch?.id || row.id;
+            if (seedMatch && seedMatch.id !== row.id) {
+              mergedMap.delete(seedMatch.id);
+            }
             const emp: Employee = {
-              id: row.id,
+              id: canonicalId,
               employee_nik: row.employee_nik,
               tax_bpjs_id: row.tax_bpjs_id || seedMatch?.tax_bpjs_id || '',
               full_name: row.full_name,
@@ -2451,29 +2767,20 @@ export const SkenaHrApi = {
             };
             mergedMap.set(emp.id, emp);
           });
-
-          // Pastikan seed arsip kolaborator tetap muncul bila belum ada di tabel remote
-          DEFAULT_EMPLOYEES.filter((e) => !e.is_active).forEach((arcEmp) => {
-            if (deletedEmployeeIds.has(arcEmp.id) || deletedEmployeeIds.has(arcEmp.employee_nik)) return;
-            const existsByNik = Array.from(mergedMap.values()).some((m) => m.employee_nik === arcEmp.employee_nik);
-            if (!existsByNik && !mergedMap.has(arcEmp.id)) {
-              mergedMap.set(arcEmp.id, { ...arcEmp });
-            }
-          });
-
-          // Apply any local overrides that may not have persisted to a legacy schema
-          editedEmployeesMap.forEach((editedEmp) => {
-            if (deletedEmployeeIds.has(editedEmp.id)) return;
-            for (const [k, v] of mergedMap.entries()) {
-              if (k === editedEmp.id || v.employee_nik === editedEmp.employee_nik) {
-                mergedMap.delete(k);
-              }
-            }
-            mergedMap.set(editedEmp.id, editedEmp);
-          });
-
-          localEmployees = Array.from(mergedMap.values());
         }
+
+        // 3. Terapkan seluruh perubahan dari Cloud Sync Store & sesi aktif (editedEmployeesMap)
+        editedEmployeesMap.forEach((editedEmp) => {
+          if (deletedEmployeeIds.has(editedEmp.id) || deletedEmployeeIds.has(editedEmp.employee_nik)) return;
+          for (const [k, v] of mergedMap.entries()) {
+            if (k === editedEmp.id || v.employee_nik === editedEmp.employee_nik) {
+              mergedMap.delete(k);
+            }
+          }
+          mergedMap.set(editedEmp.id, editedEmp);
+        });
+
+        localEmployees = Array.from(mergedMap.values());
       } catch (e: any) {
         console.warn('Supabase getEmployees fallback:', e?.message);
       }
@@ -2544,6 +2851,7 @@ export const SkenaHrApi = {
 
     editedEmployeesMap.set(updatedLocal.id, updatedLocal);
     deletedEmployeeIds.delete(updatedLocal.id);
+    deletedEmployeeIds.delete(updatedLocal.employee_nik);
 
     // Sinkronkan juga informasi karyawan ke akun user terkait secara real-time
     localUsers = localUsers.map((u) => {
@@ -2563,6 +2871,7 @@ export const SkenaHrApi = {
       return u;
     });
 
+    await saveCloudStateSync();
     notifyRealtimeListeners('employees', idx >= 0 ? 'UPDATE' : 'INSERT');
 
     const client = getSupabase();
@@ -2597,7 +2906,8 @@ export const SkenaHrApi = {
 
       if (!error && data) {
         const merged = { ...data, ...updatedLocal };
-        editedEmployeesMap.set(data.id, merged);
+        editedEmployeesMap.set(updatedLocal.id, merged);
+        await saveCloudStateSync();
         return merged;
       }
 
@@ -2657,6 +2967,7 @@ export const SkenaHrApi = {
     Object.keys(localReports).forEach((k) => {
       if (k.startsWith(`${id}-`)) delete localReports[k];
     });
+    await saveCloudStateSync();
     notifyRealtimeListeners('employees', 'DELETE');
 
     const client = getSupabase();
@@ -2702,6 +3013,7 @@ export const SkenaHrApi = {
 
   // 3. Competencies & KPI Matrix
   async getCompetencies(): Promise<Competency[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (client) {
       try {
@@ -2709,32 +3021,54 @@ export const SkenaHrApi = {
           .from('competencies')
           .select('*')
           .order('competency_code', { ascending: true });
+        const mergedMap = new Map<string, Competency>();
+
+        // 1. Masukkan seluruh kamus kompetensi default yang tidak dihapus
+        DEFAULT_COMPETENCIES.forEach((seedComp) => {
+          if (deletedCompetencyIds.has(seedComp.id) || deletedCompetencyIds.has(seedComp.competency_code)) return;
+          mergedMap.set(seedComp.id, { ...seedComp });
+        });
+
+        // 2. Timpa dengan data dari tabel Supabase
         if (!error && data && data.length > 0) {
-          const mergedMap = new Map<string, Competency>();
           data.forEach((row: any) => {
             if (deletedCompetencyIds.has(row.id) || deletedCompetencyIds.has(row.competency_code)) return;
-            mergedMap.set(row.id, {
-              id: row.id,
+            const seedMatch = DEFAULT_COMPETENCIES.find(
+              (c) => c.id === row.id || c.competency_code === row.competency_code
+            );
+            const canonicalId = seedMatch?.id || row.id;
+            if (seedMatch && seedMatch.id !== row.id) {
+              mergedMap.delete(seedMatch.id);
+            }
+            mergedMap.set(canonicalId, {
+              id: canonicalId,
               competency_code: row.competency_code,
               competency_name: row.competency_name,
-              category: row.category || 'Core KPI',
-              target_threshold: Number(row.target_threshold ?? 75),
-              standard_workload_hours: Number(row.standard_workload_hours ?? 40),
-              description: row.description,
-              level_descriptors: row.level_descriptors,
+              category: row.category || seedMatch?.category || 'Core KPI',
+              target_threshold: Number(row.target_threshold ?? seedMatch?.target_threshold ?? 75),
+              standard_workload_hours: Number(row.standard_workload_hours ?? seedMatch?.standard_workload_hours ?? 40),
+              description: row.description || seedMatch?.description,
+              level_descriptors: row.level_descriptors || seedMatch?.level_descriptors,
+              level_1_desc: row.level_1_desc || seedMatch?.level_1_desc || 'Dasar / Perlu supervisi penuh',
+              level_2_desc: row.level_2_desc || seedMatch?.level_2_desc || 'Mampu eksekusi tugas rutin',
+              level_3_desc: row.level_3_desc || seedMatch?.level_3_desc || 'Mandiri & memenuhi standar Skena',
+              level_4_desc: row.level_4_desc || seedMatch?.level_4_desc || 'Mahir & mampu memecahkan masalah kompleks',
+              level_5_desc: row.level_5_desc || seedMatch?.level_5_desc || 'Expert / Mentor lintas tim',
             });
           });
-          editedCompetenciesMap.forEach((edited) => {
-            if (deletedCompetencyIds.has(edited.id)) return;
-            for (const [k, v] of mergedMap.entries()) {
-              if (k === edited.id || v.competency_code === edited.competency_code) {
-                mergedMap.delete(k);
-              }
-            }
-            mergedMap.set(edited.id, edited);
-          });
-          localCompetencies = Array.from(mergedMap.values());
         }
+
+        // 3. Terapkan perubahan dari Cloud Sync Store & sesi aktif
+        editedCompetenciesMap.forEach((edited) => {
+          if (deletedCompetencyIds.has(edited.id) || deletedCompetencyIds.has(edited.competency_code)) return;
+          for (const [k, v] of mergedMap.entries()) {
+            if (k === edited.id || v.competency_code === edited.competency_code) {
+              mergedMap.delete(k);
+            }
+          }
+          mergedMap.set(edited.id, edited);
+        });
+        localCompetencies = Array.from(mergedMap.values());
       } catch (e: any) {
         console.warn('Supabase getCompetencies fallback:', e?.message);
       }
@@ -2773,6 +3107,8 @@ export const SkenaHrApi = {
 
     editedCompetenciesMap.set(item.id, item);
     deletedCompetencyIds.delete(item.id);
+    deletedCompetencyIds.delete(item.competency_code);
+    await saveCloudStateSync();
     notifyRealtimeListeners('competencies', idx >= 0 ? 'UPDATE' : 'INSERT');
 
     const client = getSupabase();
@@ -2823,6 +3159,7 @@ export const SkenaHrApi = {
     if (comp?.competency_code) deletedCompetencyIds.add(comp.competency_code);
     editedCompetenciesMap.delete(id);
     localCompetencies = localCompetencies.filter((c) => c.id !== id);
+    await saveCloudStateSync();
     notifyRealtimeListeners('competencies', 'DELETE');
 
     const client = getSupabase();
@@ -2839,6 +3176,7 @@ export const SkenaHrApi = {
 
   // 4. Work Schedules
   async getSchedules(): Promise<WorkSchedule[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (client) {
       try {
@@ -2846,8 +3184,14 @@ export const SkenaHrApi = {
           .from('work_schedules')
           .select('*')
           .order('start_time', { ascending: true });
+        const mergedMap = new Map<string, WorkSchedule>();
+
+        DEFAULT_SCHEDULES.forEach((seedSched) => {
+          if (deletedScheduleIds.has(seedSched.id)) return;
+          mergedMap.set(seedSched.id, { ...seedSched });
+        });
+
         if (!error && data && data.length > 0) {
-          const mergedMap = new Map<string, WorkSchedule>();
           data.forEach((row: any) => {
             if (deletedScheduleIds.has(row.id)) return;
             const comp =
@@ -2858,13 +3202,13 @@ export const SkenaHrApi = {
               competencies: comp,
             });
           });
-          editedSchedulesMap.forEach((edited) => {
-            if (!deletedScheduleIds.has(edited.id)) {
-              mergedMap.set(edited.id, edited);
-            }
-          });
-          localSchedules = Array.from(mergedMap.values());
         }
+        editedSchedulesMap.forEach((edited) => {
+          if (!deletedScheduleIds.has(edited.id)) {
+            mergedMap.set(edited.id, edited);
+          }
+        });
+        localSchedules = Array.from(mergedMap.values());
       } catch (e: any) {
         console.warn('Supabase getSchedules fallback:', e?.message);
       }
@@ -2910,6 +3254,7 @@ export const SkenaHrApi = {
 
     editedSchedulesMap.set(updated.id, updated);
     deletedScheduleIds.delete(updated.id);
+    await saveCloudStateSync();
     notifyRealtimeListeners('work_schedules', idx >= 0 ? 'UPDATE' : 'INSERT');
 
     const client = getSupabase();
@@ -2948,6 +3293,7 @@ export const SkenaHrApi = {
     deletedScheduleIds.add(id);
     editedSchedulesMap.delete(id);
     localSchedules = localSchedules.filter((s) => s.id !== id);
+    await saveCloudStateSync();
     notifyRealtimeListeners('work_schedules', 'DELETE');
 
     const client = getSupabase();
@@ -3072,6 +3418,7 @@ export const SkenaHrApi = {
   },
 
   async getAttendancesByDate(date: string): Promise<AttendanceRecord[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (client) {
       try {
@@ -3094,24 +3441,29 @@ export const SkenaHrApi = {
         console.warn('getAttendancesByDate fallback:', e?.message);
       }
     }
-    return localAttendances.filter((a) => a.attendance_date === date);
+    return localAttendances.filter(
+      (a) => a.attendance_date === date && !deletedAttendanceKeys.has(`${a.employee_id}-${a.attendance_date}`)
+    );
   },
 
   async getAttendancesByMonth(yearMonth: string): Promise<AttendanceRecord[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
-    if (client && yearMonth) {
+    if (client) {
       try {
-        const [yStr, mStr] = yearMonth.split('-');
-        const y = parseInt(yStr, 10);
-        const m = parseInt(mStr, 10);
-        const lastDay = new Date(y, m, 0).getDate() || 28;
-        const startDate = `${yearMonth}-01`;
-        const endDate = `${yearMonth}-${String(lastDay).padStart(2, '0')}`;
-        const { data, error } = await client
-          .from('attendances')
-          .select('*')
-          .gte('attendance_date', startDate)
-          .lte('attendance_date', endDate);
+        let query = client.from('attendances').select('*');
+        if (yearMonth) {
+          const [yStr, mStr] = yearMonth.split('-');
+          const y = parseInt(yStr, 10);
+          const m = parseInt(mStr, 10);
+          const lastDay = new Date(y, m, 0).getDate() || 28;
+          const startDate = `${yearMonth}-01`;
+          const endDate = `${yearMonth}-${String(lastDay).padStart(2, '0')}`;
+          query = query.gte('attendance_date', startDate).lte('attendance_date', endDate);
+        } else {
+          query = query.order('attendance_date', { ascending: false });
+        }
+        const { data, error } = await query;
         if (!error && data) {
           data.forEach((row: any) => {
             const key = `${row.employee_id}-${row.attendance_date}`;
@@ -3130,10 +3482,15 @@ export const SkenaHrApi = {
         console.warn('getAttendancesByMonth fallback:', e?.message);
       }
     }
-    return localAttendances.filter((a) => a.attendance_date.startsWith(yearMonth));
+    return localAttendances.filter(
+      (a) =>
+        (!yearMonth || a.attendance_date.startsWith(yearMonth)) &&
+        !deletedAttendanceKeys.has(`${a.employee_id}-${a.attendance_date}`)
+    );
   },
 
   async getAllEmployeeAttendances(employeeId: string): Promise<AttendanceRecord[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (client) {
       try {
@@ -3156,10 +3513,13 @@ export const SkenaHrApi = {
         console.warn('getAllEmployeeAttendances fallback:', e?.message);
       }
     }
-    return localAttendances.filter((a) => a.employee_id === employeeId);
+    return localAttendances.filter(
+      (a) => a.employee_id === employeeId && !deletedAttendanceKeys.has(`${a.employee_id}-${a.attendance_date}`)
+    );
   },
 
   async getAllAttendances(): Promise<AttendanceRecord[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (client) {
       try {
@@ -3185,7 +3545,7 @@ export const SkenaHrApi = {
         console.warn('getAllAttendances fallback:', e?.message);
       }
     }
-    return [...localAttendances];
+    return localAttendances.filter((a) => !deletedAttendanceKeys.has(`${a.employee_id}-${a.attendance_date}`));
   },
 
   async batchUpsertAttendances(records: AttendanceRecord[]): Promise<void> {
@@ -3214,11 +3574,11 @@ export const SkenaHrApi = {
       upsertedItems.push(formatted);
     });
 
-    notifyRealtimeListeners('attendances', 'UPDATE');
-
     for (const item of upsertedItems) {
       await this.saveSingleAttendanceToDb(item);
     }
+    await saveCloudStateSync();
+    notifyRealtimeListeners('attendances', 'UPDATE');
   },
 
   async submitEmployeeAttendance(record: AttendanceRecord): Promise<AttendanceRecord> {
@@ -3242,9 +3602,10 @@ export const SkenaHrApi = {
     const key = `${item.employee_id}-${item.attendance_date}`;
     editedAttendancesMap.set(key, item);
     deletedAttendanceKeys.delete(key);
-    notifyRealtimeListeners('attendances', idx >= 0 ? 'UPDATE' : 'INSERT');
 
     await this.saveSingleAttendanceToDb(item);
+    await saveCloudStateSync();
+    notifyRealtimeListeners('attendances', idx >= 0 ? 'UPDATE' : 'INSERT');
     return item;
   },
 
@@ -3255,15 +3616,17 @@ export const SkenaHrApi = {
     localAttendances = localAttendances.filter(
       (a) => !(a.employee_id === employeeId && a.attendance_date === date)
     );
-    notifyRealtimeListeners('attendances', 'DELETE');
 
     const client = getSupabase();
-    if (!client) return;
-    try {
-      await client.from('attendances').delete().eq('employee_id', employeeId).eq('attendance_date', date);
-    } catch (e: any) {
-      console.warn('deleteAttendanceRecord fallback:', e?.message);
+    if (client) {
+      try {
+        await client.from('attendances').delete().eq('employee_id', employeeId).eq('attendance_date', date);
+      } catch (e: any) {
+        console.warn('deleteAttendanceRecord fallback:', e?.message);
+      }
     }
+    await saveCloudStateSync();
+    notifyRealtimeListeners('attendances', 'DELETE');
   },
 
   // 6. Activity & LMS Daily Logs (Jurnal Sprint Harian & LMS — Tersinkronisasi Penuh dengan Supabase)
@@ -3524,14 +3887,15 @@ export const SkenaHrApi = {
 
   // 7. KPI Evaluations & Workload Analysis
   async getKpiEvaluations(periodYear: string, periodTerm: string): Promise<KpiEvaluation[]> {
+    await loadCloudStateSync();
+    const wSprint = (localKpiWeights.sprint_weight_pct ?? 50) / 100;
+    const wSkill = (localKpiWeights.skill_weight_pct ?? 30) / 100;
+    const wProj = (localKpiWeights.project_weight_pct ?? 20) / 100;
+
     const client = getSupabase();
     if (client) {
       try {
-        const { data, error } = await client
-          .from('kpi_evaluations')
-          .select('*')
-          .eq('period_year', periodYear)
-          .eq('period_term', periodTerm);
+        const { data, error } = await client.from('kpi_evaluations').select('*');
         if (!error && data && data.length > 0) {
           data.forEach((row: any) => {
             const key = `${row.employee_id}-${row.competency_id}-${row.period_year}-${row.period_term}`;
@@ -3540,7 +3904,7 @@ export const SkenaHrApi = {
               const qAvg =
                 (Number(row.kpi_q1) + Number(row.kpi_q2) + Number(row.kpi_q3) + Number(row.kpi_q4)) / 4.0;
               const calcScore = Number(
-                (qAvg * 0.5 + Number(row.mid_review_score) * 0.3 + Number(row.final_project_score) * 0.2).toFixed(2)
+                (qAvg * wSprint + Number(row.mid_review_score) * wSkill + Number(row.final_project_score) * wProj).toFixed(2)
               );
               const item: KpiEvaluation = {
                 id: row.id,
@@ -3575,7 +3939,38 @@ export const SkenaHrApi = {
         console.warn('Supabase getKpiEvaluations fallback:', e?.message);
       }
     }
-    return localKpiList.filter((k) => k.period_year === periodYear && k.period_term === periodTerm);
+
+    // Pastikan jika period_year / period_term diubah di pengaturan perusahaan, data evaluasi KPI tetap terhubung
+    const exactMatches = localKpiList.filter(
+      (k) =>
+        k.period_year === periodYear &&
+        k.period_term === periodTerm &&
+        !deletedKpiKeys.has(`${k.employee_id}-${k.competency_id}-${periodYear}-${periodTerm}`)
+    );
+    const pairMap = new Map<string, KpiEvaluation>();
+    exactMatches.forEach((k) => {
+      pairMap.set(`${k.employee_id}::${k.competency_id}`, k);
+    });
+
+    // Lengkapi dari baseline KPI jika pasangan karyawan-kompetensi belum ada di periode baru dan belum dihapus
+    localKpiList.forEach((k) => {
+      const pairKey = `${k.employee_id}::${k.competency_id}`;
+      const targetDelKey = `${k.employee_id}-${k.competency_id}-${periodYear}-${periodTerm}`;
+      if (!pairMap.has(pairKey) && !deletedKpiKeys.has(targetDelKey)) {
+        const qAvg = (Number(k.kpi_q1) + Number(k.kpi_q2) + Number(k.kpi_q3) + Number(k.kpi_q4)) / 4.0;
+        const calcScore = Number(
+          (qAvg * wSprint + Number(k.mid_review_score) * wSkill + Number(k.final_project_score) * wProj).toFixed(2)
+        );
+        pairMap.set(pairKey, {
+          ...k,
+          period_year: periodYear,
+          period_term: periodTerm,
+          final_kpi_score: calcScore,
+        });
+      }
+    });
+
+    return Array.from(pairMap.values());
   },
 
   async deleteKpiEvaluation(
@@ -3596,6 +3991,7 @@ export const SkenaHrApi = {
           k.period_term === periodTerm
         )
     );
+    await saveCloudStateSync();
     notifyRealtimeListeners('kpi_evaluations', 'DELETE');
 
     const client = getSupabase();
@@ -3614,10 +4010,13 @@ export const SkenaHrApi = {
   },
 
   async upsertKpiEvaluation(payload: KpiEvaluation): Promise<KpiEvaluation> {
+    const wSprint = (localKpiWeights.sprint_weight_pct ?? 50) / 100;
+    const wSkill = (localKpiWeights.skill_weight_pct ?? 30) / 100;
+    const wProj = (localKpiWeights.project_weight_pct ?? 20) / 100;
     const qAvg =
       (Number(payload.kpi_q1) + Number(payload.kpi_q2) + Number(payload.kpi_q3) + Number(payload.kpi_q4)) / 4.0;
     const calcScore = Number(
-      (qAvg * 0.5 + Number(payload.mid_review_score) * 0.3 + Number(payload.final_project_score) * 0.2).toFixed(2)
+      (qAvg * wSprint + Number(payload.mid_review_score) * wSkill + Number(payload.final_project_score) * wProj).toFixed(2)
     );
 
     const idx = localKpiList.findIndex(
@@ -3639,6 +4038,7 @@ export const SkenaHrApi = {
     const key = `${fullPayload.employee_id}-${fullPayload.competency_id}-${fullPayload.period_year}-${fullPayload.period_term}`;
     editedKpiMap.set(key, fullPayload);
     deletedKpiKeys.delete(key);
+    await saveCloudStateSync();
     notifyRealtimeListeners('kpi_evaluations', idx >= 0 ? 'UPDATE' : 'INSERT');
 
     const client = getSupabase();
@@ -3668,6 +4068,8 @@ export const SkenaHrApi = {
 
   // 8. Employee Report Cards, IDP & Talent Pipeline
   async getEmployeeReport(employeeId: string, periodYear: string, periodTerm: string): Promise<EmployeeReport | null> {
+    if (employeeId === CLOUD_STORE_EMP_ID) return null;
+    await loadCloudStateSync();
     const key = `${employeeId}-${periodYear}-${periodTerm}`;
     const client = getSupabase();
     if (client) {
@@ -3680,7 +4082,7 @@ export const SkenaHrApi = {
           .order('report_date', { ascending: false })
           .limit(1)
           .maybeSingle();
-        if (!error && data && !localReports[key]) {
+        if (!error && data && data.employee_id !== CLOUD_STORE_EMP_ID && !localReports[key]) {
           localReports[key] = data;
         }
       } catch (e: any) {
@@ -3697,7 +4099,7 @@ export const SkenaHrApi = {
       id: payload.id || localReports[key]?.id || generateUuid(),
     };
     localReports[key] = item;
-    // Simpan juga di kunci standar period_term jika user memilih sub-bulan
+    await saveCloudStateSync();
     notifyRealtimeListeners('employee_reports', 'UPDATE');
 
     const client = getSupabase();
@@ -3844,16 +4246,22 @@ export const SkenaHrApi = {
   },
 
   async getJobProfiles(): Promise<JobProfile[]> {
+    await loadCloudStateSync();
     const client = getSupabase();
     if (client) {
       try {
         const { data, error } = await client.from('job_profiles').select('*').order('role_title', { ascending: true });
-        if (!error && data && data.length === 0 && localJobProfiles.length > 0 && editedJobProfilesMap.size === 0) {
-          for (const jp of localJobProfiles) {
-            await this.saveSingleJobProfileToSupabase(jp);
-          }
-        } else if (!error && data && data.length > 0) {
-          const mergedMap = new Map<string, JobProfile>();
+        const mergedMap = new Map<string, JobProfile>();
+
+        // 1. Masukkan seluruh Job Profile default yang tidak dihapus
+        DEFAULT_JOB_PROFILES.forEach((seedJp) => {
+          const roleClean = (seedJp.role_title || '').trim().toLowerCase();
+          if (deletedJobProfileIds.has(seedJp.id) || deletedJobProfileIds.has(roleClean)) return;
+          mergedMap.set(seedJp.id, { ...seedJp });
+        });
+
+        // 2. Timpa dengan data dari tabel Supabase
+        if (!error && data && data.length > 0) {
           data.forEach((row: any) => {
             const roleClean = (row.role_title || '').trim().toLowerCase();
             if (deletedJobProfileIds.has(row.id) || deletedJobProfileIds.has(roleClean)) return;
@@ -3861,6 +4269,10 @@ export const SkenaHrApi = {
             const defaultMatch = DEFAULT_JOB_PROFILES.find(
               (d) => d.id === row.id || d.role_title.toLowerCase() === roleClean
             );
+            const canonicalId = defaultMatch?.id || row.id;
+            if (defaultMatch && defaultMatch.id !== row.id) {
+              mergedMap.delete(defaultMatch.id);
+            }
 
             const reqList =
               Array.isArray(row.requirements) && row.requirements.length > 0
@@ -3897,8 +4309,8 @@ export const SkenaHrApi = {
               defaultMatch?.direct_supervisor ||
               'Managing Director';
 
-            mergedMap.set(row.id, {
-              id: row.id,
+            mergedMap.set(canonicalId, {
+              id: canonicalId,
               role_title: row.role_title,
               department: row.department || defaultMatch?.department || 'Creative',
               summary: row.summary || row.role_summary || defaultMatch?.summary || '',
@@ -3913,21 +4325,21 @@ export const SkenaHrApi = {
               workflow_steps: Array.isArray(row.workflow_steps) ? row.workflow_steps : defaultMatch?.workflow_steps,
             });
           });
-
-          // Pastikan semua perubahan sesi aktif (editedJobProfilesMap) menimpa dan tidak terduplikasi
-          editedJobProfilesMap.forEach((edited) => {
-            const roleClean = (edited.role_title || '').trim().toLowerCase();
-            if (deletedJobProfileIds.has(edited.id) || deletedJobProfileIds.has(roleClean)) return;
-            for (const [k, v] of mergedMap.entries()) {
-              if (k === edited.id || (v.role_title || '').trim().toLowerCase() === roleClean) {
-                mergedMap.delete(k);
-              }
-            }
-            mergedMap.set(edited.id, edited);
-          });
-
-          localJobProfiles = Array.from(mergedMap.values());
         }
+
+        // 3. Pastikan semua perubahan dari Cloud Sync Store & sesi aktif (editedJobProfilesMap) menimpa dan tidak terduplikasi
+        editedJobProfilesMap.forEach((edited) => {
+          const roleClean = (edited.role_title || '').trim().toLowerCase();
+          if (deletedJobProfileIds.has(edited.id) || deletedJobProfileIds.has(roleClean)) return;
+          for (const [k, v] of mergedMap.entries()) {
+            if (k === edited.id || (v.role_title || '').trim().toLowerCase() === roleClean) {
+              mergedMap.delete(k);
+            }
+          }
+          mergedMap.set(edited.id, edited);
+        });
+
+        localJobProfiles = Array.from(mergedMap.values());
       } catch {
         // fallback to RAM if table not created yet
       }
@@ -4065,6 +4477,7 @@ export const SkenaHrApi = {
       if (currIdx >= 0) localJobProfiles[currIdx] = item;
     }
 
+    await saveCloudStateSync();
     notifyRealtimeListeners('job_profiles', idx >= 0 ? 'UPDATE' : 'INSERT');
     return item;
   },
@@ -4077,6 +4490,7 @@ export const SkenaHrApi = {
     }
     editedJobProfilesMap.delete(id);
     localJobProfiles = localJobProfiles.filter((jp) => jp.id !== id);
+    await saveCloudStateSync();
     notifyRealtimeListeners('job_profiles', 'DELETE');
 
     const client = getSupabase();
@@ -4802,6 +5216,9 @@ export const SkenaHrApi = {
       await this.upsertUserAccountAsync(u, u.username);
     }
 
+    // 9. Sinkronkan Cloud State Store (Senin Di Skena, Bincang Kenyang, OYAP, Reminders, Bobot KPI & Presensi)
+    await saveCloudStateSync();
+
     notifyRealtimeListeners('all_tables', 'SYNC');
 
     return {
@@ -4818,6 +5235,7 @@ export const SkenaHrApi = {
 
   // 14. Proporsi Penilaian KPI (Bisa Diatur oleh Administrator)
   getKpiWeights(): KpiWeightConfig {
+    hydrateFromLocalStorage();
     return { ...localKpiWeights };
   },
 
@@ -4837,10 +5255,17 @@ export const SkenaHrApi = {
       const newFinal = Number(
         (qAvg * wSprint + Number(k.mid_review_score) * wSkill + Number(k.final_project_score) * wProj).toFixed(2)
       );
-      return { ...k, final_kpi_score: newFinal };
+      const updatedK = { ...k, final_kpi_score: newFinal };
+      const key = `${k.employee_id}-${k.competency_id}-${k.period_year}-${k.period_term}`;
+      if (editedKpiMap.has(key)) {
+        editedKpiMap.set(key, updatedK);
+      }
+      return updatedK;
     });
 
+    await saveCloudStateSync();
     notifyRealtimeListeners('kpi_evaluations', 'UPDATE');
+    notifyRealtimeListeners('company_settings', 'UPDATE');
     return { ...localKpiWeights };
   },
 
@@ -4850,10 +5275,12 @@ export const SkenaHrApi = {
 
   // 15. Senin Di Skena (Setiap Senin) & Bincang Kenyang (Setiap Jumat)
   async getSharingSessions(): Promise<SharingSessionItem[]> {
+    await loadCloudStateSync();
     return [...localSharingSessions].sort((a, b) => (b.session_date || '').localeCompare(a.session_date || ''));
   },
 
   async upsertSharingSession(payload: Partial<SharingSessionItem>): Promise<SharingSessionItem> {
+    await loadCloudStateSync();
     const targetId = payload.id || `ss-${Date.now()}`;
     const idx = localSharingSessions.findIndex((s) => s.id === targetId);
     const prev = idx >= 0 ? localSharingSessions[idx] : null;
@@ -4882,21 +5309,26 @@ export const SkenaHrApi = {
     if (idx >= 0) localSharingSessions[idx] = item;
     else localSharingSessions.unshift(item);
 
+    await saveCloudStateSync();
     notifyRealtimeListeners('sharing_sessions', idx >= 0 ? 'UPDATE' : 'INSERT');
     return item;
   },
 
   async deleteSharingSession(id: string): Promise<void> {
+    await loadCloudStateSync();
     localSharingSessions = localSharingSessions.filter((s) => s.id !== id);
+    await saveCloudStateSync();
     notifyRealtimeListeners('sharing_sessions', 'DELETE');
   },
 
   // 16. One Year Plan (Annual Roadmap & Checklist)
   async getOneYearPlans(): Promise<OneYearPlanItem[]> {
+    await loadCloudStateSync();
     return [...localOneYearPlans];
   },
 
   async upsertOneYearPlan(payload: Partial<OneYearPlanItem>): Promise<OneYearPlanItem> {
+    await loadCloudStateSync();
     const targetId = payload.id || `oyp-${Date.now()}`;
     const idx = localOneYearPlans.findIndex((p) => p.id === targetId);
     const prev = idx >= 0 ? localOneYearPlans[idx] : null;
@@ -4929,11 +5361,13 @@ export const SkenaHrApi = {
     if (idx >= 0) localOneYearPlans[idx] = item;
     else localOneYearPlans.push(item);
 
+    await saveCloudStateSync();
     notifyRealtimeListeners('one_year_plans', idx >= 0 ? 'UPDATE' : 'INSERT');
     return item;
   },
 
   async toggleOneYearPlan(id: string): Promise<OneYearPlanItem | null> {
+    await loadCloudStateSync();
     const idx = localOneYearPlans.findIndex((p) => p.id === id);
     if (idx < 0) return null;
     const current = localOneYearPlans[idx];
@@ -4941,24 +5375,30 @@ export const SkenaHrApi = {
     const updated: OneYearPlanItem = {
       ...current,
       is_completed: nextDone,
+      status: nextDone ? 'Completed' : 'On Track',
       progress_pct: nextDone ? 100 : current.progress_pct === 100 ? 75 : current.progress_pct,
     };
     localOneYearPlans[idx] = updated;
+    await saveCloudStateSync();
     notifyRealtimeListeners('one_year_plans', 'UPDATE');
     return updated;
   },
 
   async deleteOneYearPlan(id: string): Promise<void> {
+    await loadCloudStateSync();
     localOneYearPlans = localOneYearPlans.filter((p) => p.id !== id);
+    await saveCloudStateSync();
     notifyRealtimeListeners('one_year_plans', 'DELETE');
   },
 
   // 17. Executive Reminders & Dashboard Agenda (CSR Bulanan, Penggajian, Pengajuan Budget Rabu, Kontrak H-2 Bulan, Resign)
   async getExecutiveReminders(): Promise<ExecutiveReminderItem[]> {
+    await loadCloudStateSync();
     return [...localExecutiveReminders];
   },
 
   async upsertExecutiveReminder(payload: Partial<ExecutiveReminderItem>): Promise<ExecutiveReminderItem> {
+    await loadCloudStateSync();
     const targetId = payload.id || `rem-${Date.now()}`;
     const idx = localExecutiveReminders.findIndex((r) => r.id === targetId);
     const prev = idx >= 0 ? localExecutiveReminders[idx] : null;
@@ -4982,6 +5422,7 @@ export const SkenaHrApi = {
     if (idx >= 0) localExecutiveReminders[idx] = item;
     else localExecutiveReminders.unshift(item);
 
+    await saveCloudStateSync();
     notifyRealtimeListeners('executive_reminders', idx >= 0 ? 'UPDATE' : 'INSERT');
     return item;
   },
@@ -4992,24 +5433,50 @@ export const SkenaHrApi = {
   },
 
   async toggleExecutiveReminder(id: string): Promise<ExecutiveReminderItem | null> {
+    await loadCloudStateSync();
     const idx = localExecutiveReminders.findIndex((r) => r.id === id);
     if (idx < 0) return null;
     localExecutiveReminders[idx] = {
       ...localExecutiveReminders[idx],
       is_completed: !localExecutiveReminders[idx].is_completed,
     };
+    await saveCloudStateSync();
     notifyRealtimeListeners('executive_reminders', 'UPDATE');
     return localExecutiveReminders[idx];
   },
 
   async deleteExecutiveReminder(id: string): Promise<ExecutiveReminderItem[]> {
+    await loadCloudStateSync();
     localExecutiveReminders = localExecutiveReminders.filter((r) => r.id !== id);
+    await saveCloudStateSync();
     notifyRealtimeListeners('executive_reminders', 'DELETE');
     return [...localExecutiveReminders];
   },
 
   // 18. Ambil Seluruh Rapor & IDP Karyawan untuk Output Grafik Keseluruhan & Individu
   async getAllEmployeeReports(periodYear: string, periodTerm: string): Promise<Record<string, EmployeeReport>> {
+    await loadCloudStateSync();
+    const client = getSupabase();
+    if (client) {
+      try {
+        const { data, error } = await client
+          .from('employee_reports')
+          .select('*')
+          .neq('employee_id', CLOUD_STORE_EMP_ID);
+        if (!error && data && data.length > 0) {
+          data.forEach((row: any) => {
+            if (!row || row.employee_id === CLOUD_STORE_EMP_ID || row.period_year === CLOUD_STORE_YEAR) return;
+            const k = `${row.employee_id}-${row.period_year}-${row.period_term}`;
+            if (!localReports[k]) {
+              localReports[k] = row as EmployeeReport;
+            }
+          });
+        }
+      } catch {
+        // ignore fallback
+      }
+    }
+
     const result: Record<string, EmployeeReport> = {};
     const activeEmps = localEmployees.filter((e) => e.is_active);
     for (const emp of activeEmps) {
